@@ -136,11 +136,10 @@ def is_master(user_id):
 
 # ========== 子进程环境 ==========
 def _venv_python():
-    """优先使用项目 venv 的 python（jmcomic 装在里面），兼容 Linux/Windows"""
-    for cand in (os.path.join(BASE_DIR, "venv", "bin", "python"),
-                 os.path.join(BASE_DIR, "venv", "Scripts", "python.exe")):
-        if os.path.exists(cand):
-            return cand
+    """优先使用项目 venv 的 python（jmcomic 装在里面）"""
+    cand = os.path.join(BASE_DIR, "venv", "bin", "python")
+    if os.path.exists(cand):
+        return cand
     return sys.executable
 
 
