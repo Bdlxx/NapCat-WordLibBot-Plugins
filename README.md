@@ -32,14 +32,14 @@ __plugin_author__ = "作者"
 
 3. 配置存于 `data/<name_en>_config.json`（`commands` / `settings` / `messages` 三段式），
    Web 面板自动识别展示
-4. 插件开关：群内发送「开启/关闭<插件名>」（仅主人），或 Web 面板群组开关表格
-   （新插件自动出现在 Web 面板，无需手动注册）
+4. 插件开关：各插件自定义开关命令（通常为「开启/关闭<插件名>」，仅主人可用，群内=本群开关、私聊=全局），
+   也可在 Web 面板群组开关表格中控制（新插件自动出现，无需手动注册）
 
 ## 手动安装/更新
 
 ```bash
-git clone https://github.com/Bdlxx/NapCat-WordLibBot-Plugins.git /tmp/napcat-plugins
-cp /tmp/napcat-plugins/*.py /root/mybot_<QQ>/plugins/
+git clone --depth 1 https://github.com/Bdlxx/NapCat-WordLibBot-Plugins.git /tmp/napbot_plugin_repo
+cp /tmp/napbot_plugin_repo/*.py /root/mybot_<QQ>/plugins/
 ```
 
 或直接运行主仓库的 `install.sh`（部署/更新实例时自动拉取）。
