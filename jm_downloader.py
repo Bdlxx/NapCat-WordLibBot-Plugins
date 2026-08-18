@@ -64,6 +64,9 @@ DEFAULT_CONFIG = {
         "download_dir": "jm_downloads",  # 图片下载目录（相对 data/）
         "task_timeout_seconds": 1800,    # 单次下载超时（秒）
         "cleanup_delay_seconds": 600,    # 发送文件后延迟清理的时间（秒）。NapCat 是异步读取文件，不能立即删除
+        "recall_enabled": False,         # 发送的消息自动撤回（后台开关）
+        "recall_seconds": 120,           # 撤回时间（秒，QQ 限制 2 分钟内可撤回）
+        "recall_notice": True,           # 撤回前提醒（整套消息只提醒一次）
     },
     "messages": {
         "usage": "📖 用法：\njm <本子id> 下载整个本子，例：jm 123456\njm 123 456 多本下载\njm 123 p456 只下载某章节\njm详情 123456 查看本子信息（不下载）",
@@ -75,6 +78,7 @@ DEFAULT_CONFIG = {
         "timeout": "⏰ 下载超时已终止，请稍后重试",
         "pdf_header": "📚 《{titles}》PDF 分享：\n文件较大，发送需要一点时间，请稍候…",
         "detail_header": "📖 《{title}》\n🆔 JM{album_id}\n✍️ 作者：{authors}\n📄 章节数：{episodes}{pages}\n🏷️ 标签：{tags}\n🕒 更新：{update_date}",
+        "recall_notice": "🔇 本次 JM 下载的整套消息将在 {seconds} 秒后自动撤回",
     },
 }
 
@@ -176,6 +180,64 @@ plugins:
         f.write(content)
 
 
+# ========== 消息撤回 ==========
+def _http_send_msg(event, message):
+    """通过 NapCat HTTP 发送消息并返回 message_id（用于撤回）"""
+    try:
+        import requests as _req
+        url = str(get_config("NAPCAT_HTTP", "http://127.0.0.1:3000")).rstrip("/")
+        token = get_config("ACCESS_TOKEN", "")
+        msg_type = event.get("message_type")
+        if msg_type == "group":
+            action, params = "send_group_msg", {"group_id": event.get("group_id")}
+        else:
+            action, params = "send_private_msg", {"user_id": event.get("user_id")}
+        params["message"] = message
+        params["access_token"] = token
+        r = _req.get(f"{url}/{action}", params=params, timeout=10)
+        data = r.json()
+        if data.get("status") == "ok" and data.get("data"):
+            return data["data"].get("message_id")
+        print(f"[JM下载] HTTP发送失败: {data}")
+    except Exception as e:
+        print(f"[JM下载] HTTP发送异常: {e}")
+    return None
+
+
+def _schedule_recall(message_id, seconds):
+    """定时撤回单条消息（QQ 限制 2 分钟内可撤回）"""
+    def _do_recall():
+        try:
+            import requests as _req
+            url = str(get_config("NAPCAT_HTTP", "http://127.0.0.1:3000")).rstrip("/")
+            token = get_config("ACCESS_TOKEN", "")
+            _req.get(f"{url}/delete_msg", params={"message_id": message_id, "access_token": token}, timeout=10)
+            print(f"[JM下载] 已撤回消息 {message_id}")
+        except Exception as e:
+            print(f"[JM下载] 撤回失败 {message_id}: {e}")
+    t = threading.Timer(max(1, int(seconds)), _do_recall)
+    t.daemon = True
+    t.start()
+
+
+def _recall_send(event, message, recall_list=None):
+    """统一发送入口：
+    - 开启撤回：HTTP 发送并记录 message_id 定时撤回；HTTP 失败退回 WS（不撤回）
+    - 未开启：走原有 WS 发送
+    """
+    if cfg("recall_enabled", False):
+        mid = _http_send_msg(event, message)
+        if mid is not None:
+            if recall_list is not None:
+                recall_list.append(mid)
+            _schedule_recall(mid, cfg("recall_seconds", 120))
+            return
+        # HTTP 失败退回 WS
+        send_message(event, message)
+    else:
+        send_message(event, message)
+
+
 # ========== 任务调度 ==========
 def _start_task(event, ids, detail_only=False):
     group_id = str(event.get("group_id") or event.get("user_id") or 0)
@@ -192,8 +254,12 @@ def _run_task(event, ids, detail_only):
     group_id = str(event.get("group_id") or event.get("user_id") or 0)
     proc = None
     yml_path = result_path = None
+    recall_list = []  # 本任务发送的消息 id（用于整套撤回）
     try:
-        send_message(event, _l("querying").format(ids="、".join(ids)))
+        # 撤回提醒（整套只提醒一次）
+        if cfg("recall_enabled", False) and cfg("recall_notice", True):
+            _recall_send(event, _l("recall_notice").format(seconds=int(cfg("recall_seconds", 120))), recall_list)
+        _recall_send(event, _l("querying").format(ids="、".join(ids)), recall_list)
         print(f"[JM下载] 任务开始 group={group_id} ids={ids} detail_only={detail_only}")
 
         task_id = f"{int(time.time())}_{os.getpid()}"
@@ -238,7 +304,7 @@ def _run_task(event, ids, detail_only):
                     continue
                 msg = _progress_to_text(data)
                 if msg:
-                    send_message(event, msg)
+                    _recall_send(event, msg, recall_list)
 
         rt = threading.Thread(target=_read_output, daemon=True)
         rt.start()
@@ -247,7 +313,7 @@ def _run_task(event, ids, detail_only):
         while proc.poll() is None:
             if time.time() > deadline:
                 proc.kill()
-                send_message(event, _l("timeout"))
+                _recall_send(event, _l("timeout"), recall_list)
                 return
             time.sleep(1)
         stop_read["flag"] = True
@@ -266,7 +332,7 @@ def _run_task(event, ids, detail_only):
         if not result or not result.get("ok"):
             err = (result or {}).get("error", f"子进程退出码 {rc}")
             print(f"[JM下载] 任务失败: {err}")
-            send_message(event, _l("fail").format(err=err))
+            _recall_send(event, _l("fail").format(err=err), recall_list)
             return
 
         if detail_only:
@@ -274,13 +340,13 @@ def _run_task(event, ids, detail_only):
             return
 
         if cfg("send_pdf", True):
-            _send_pdfs(event, result, task_id)
+            _send_pdfs(event, result, task_id, recall_list)
         else:
-            send_message(event, _l("no_pdf"))
+            _recall_send(event, _l("no_pdf"), recall_list)
     except Exception as e:
         traceback.print_exc()
         try:
-            send_message(event, _l("fail").format(err=e))
+            _recall_send(event, _l("fail").format(err=e), recall_list)
         except Exception:
             pass
     finally:
@@ -346,12 +412,12 @@ def _napcat_shared_candidates():
     return uniq
 
 
-def _send_pdfs(event, result, task_id=None):
+def _send_pdfs(event, result, task_id=None, recall_list=None):
     pdfs = []
     for r in result.get("results", []):
         pdfs += r.get("pdfs", []) or []
     if not pdfs:
-        send_message(event, _l("no_pdf"))
+        _recall_send(event, _l("no_pdf"), recall_list)
         return
 
     sent = []  # (host_path, container_path)
@@ -372,7 +438,7 @@ def _send_pdfs(event, result, task_id=None):
             print(f"[JM下载] 共享目录不可写 {host_root}: {e}")
             continue
     if cache_dir_used is None:
-        send_message(event, _l("send_fail") + f"\n本地文件保留在: {os.path.dirname(pdfs[0])}")
+        _recall_send(event, _l("send_fail") + f"\n本地文件保留在: {os.path.dirname(pdfs[0])}", recall_list)
         return
 
     _, container_root, pdf_cache_dir = cache_dir_used
@@ -392,18 +458,18 @@ def _send_pdfs(event, result, task_id=None):
         print(f"[JM下载] PDF已就绪: {p} -> {container_path}")
 
     if not sent:
-        send_message(event, _l("send_fail") + f"\n本地文件保留在: {os.path.dirname(pdfs[0])}")
+        _recall_send(event, _l("send_fail") + f"\n本地文件保留在: {os.path.dirname(pdfs[0])}", recall_list)
         return
 
     titles = []
     for r in result.get("results", []):
         titles.append(r.get("title") or r.get("album_id") or "?")
-    send_message(event, _l("pdf_header").format(titles="、".join(titles)))
+    _recall_send(event, _l("pdf_header").format(titles="、".join(titles)), recall_list)
     time.sleep(0.5)
 
     for dest, container_path in sent:
         try:
-            send_message(event, [{"type": "file", "data": {"file": container_path}}])
+            _recall_send(event, [{"type": "file", "data": {"file": container_path}}], recall_list)
         except Exception as e:
             print(f"[JM下载] 发送PDF失败 {container_path}: {e}")
         time.sleep(1.5)
