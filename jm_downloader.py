@@ -649,6 +649,10 @@ registry.register("手动更新jmcomic", ["jm更新"], "手动检查并更新 jm
 registry.register("查看本子详情", [cmd("detail", "jm详情")], "仅查看本子元信息（不下载），如 jm详情 123456", _cmd_detail, kind="prefix")
 registry.register("下载本子", [cmd("download", "jm")], "下载本子并转 PDF 分享，如 jm 123456 / jm 123 456 / jm 123 p456", _cmd_download, kind="prefix")
 
+# 同步指令中文名到配置（Web 面板展示可读指令名）
+_CONFIG.setdefault("command_labels", {}).update(registry.labels())
+_save_config()
+
 
 # ========== 主入口 ==========
 def handle(event):

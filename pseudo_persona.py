@@ -682,6 +682,10 @@ registry.register("查看当前模型", [cmd("current_model", "当前模型"), c
 registry.register("清除会话历史", [cmd("clear_history", "清除历史"), cmd("clear_history_alt", "清空历史"), cmd("clear_history_alt2", "清空记忆")], "清除当前会话的对话历史", _cmd_clear_history, master_only=True)
 registry.register("清除所有历史", [cmd("clear_all", "清除所有历史"), cmd("clear_all_alt", "清空所有历史"), cmd("clear_all_alt2", "清空所有记忆")], "清除全部会话的对话历史", _cmd_clear_all, master_only=True)
 
+# 同步指令中文名到配置（Web 面板展示可读指令名）
+CONFIG.setdefault("command_labels", {}).update(registry.labels())
+save_config()
+
 
 def handle(event):
     """插件入口"""

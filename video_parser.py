@@ -849,6 +849,10 @@ def _cmd_disable(event, raw, kw):
 registry.register("开启视频解析", ["开启视频解析"], "开启视频解析（群内=本群，私聊=全局）", _cmd_enable, master_only=True, kind="suffix")
 registry.register("关闭视频解析", ["关闭视频解析"], "关闭视频解析（群内=本群，私聊=全局）", _cmd_disable, master_only=True, kind="suffix")
 
+# 同步指令中文名到配置（Web 面板展示可读指令名）
+_CONFIG.setdefault("command_labels", {}).update(registry.labels())
+_save_config()
+
 
 def handle(event):
     if event.get("post_type") != "message":

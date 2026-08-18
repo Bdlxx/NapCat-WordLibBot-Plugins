@@ -485,6 +485,10 @@ registry.register("指定嫁", [cmd("marry_ft", "嫁")], "嫁给指定的人（�
 registry.register("闹离婚", [cmd("divorce", "闹离婚")], "与对象离婚", _cmd_divorce)
 registry.register("我的对象", [cmd("my_object", "我的对象")], "查看当前对象", _cmd_my_object)
 
+# 同步指令中文名到配置（Web 面板展示可读指令名）
+_CFG.setdefault("command_labels", {}).update(registry.labels())
+_save()
+
 
 def handle(event):
     if event.get("post_type") != "message" or event.get("message_type") != "group":
