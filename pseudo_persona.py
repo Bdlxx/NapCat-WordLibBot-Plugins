@@ -185,6 +185,7 @@ CONFIG = {
     # 触发配置
     "reply_probability": 1.0,
     "random_reply_probability": 0.0,
+    "record_group_unrelated": False,  # 群聊是否记录与机器人无关的消息（False 仅记录回复/提及，避免污染上下文）
     
     # 上下文配置
     "max_history": 50,
@@ -347,14 +348,14 @@ def get_context_for_ai(event):
     if len(history_copy) > raw_limit:
         old = history_copy[:-raw_limit]
         summary_lines = []
-        for record in old:
+        for record in old[-12:]:  # 摘要最多 12 条，避免过长
             if record["role"] == "user" and record.get("user_id"):
                 uid = str(record["user_id"])
                 nick = nicknames.get(uid, "") or record.get("sender_name", "")
                 tag = f"{nick}({uid})" if nick else f"u{uid}"
-                summary_lines.append(f"{tag}: {record['content'][:60]}")
+                summary_lines.append(f"{tag}: {record['content'][:50]}")
             else:
-                summary_lines.append(f"依星: {record['content'][:60]}")
+                summary_lines.append(f"机器人: {record['content'][:50]}")
         if summary_lines:
             summary = "[历史摘要]\n" + "\n".join(summary_lines) + "\n"
 
@@ -428,7 +429,9 @@ def download_image_as_base64(url):
 
 def build_system_prompt(user_id=None, event=None, additional_user_ids=None):
     """构建系统提示：代码默认人设 + 用户人设 + 插件提示词 + 长期记忆，替换 [nick] 为对方昵称"""
-    default_persona = """你是依星，一个温柔可爱的女孩子。
+    # 人设动态化：默认人设使用当前机器人名称（依星/羽笙等），不再硬编码
+    bot_display = CONFIG.get("bot_name") or get_bot_name()
+    default_persona = f"""你是{bot_display}，一个温柔可爱的女孩子。
 性格：温柔体贴、善解人意、偶尔撒娇卖萌
 风格：用简短句子、语气词（呀呢嘛啦）、颜文字 (◕‿◕)
 像朋友聊天，不要像客服。
@@ -443,8 +446,11 @@ def build_system_prompt(user_id=None, event=None, additional_user_ids=None):
         character_parts.append(user_persona)
 
     combined = "\n".join(character_parts)
+    # 旧版配置中可能残留硬编码默认人设（"你是依星…温柔可爱…像朋友聊天"），识别并忽略避免重复叠加
     if plugin_persona and plugin_persona != default_persona:
-        combined += "\n" + plugin_persona
+        _legacy_default = ("一个温柔可爱的女孩子" in plugin_persona and "像朋友聊天" in plugin_persona)
+        if not _legacy_default:
+            combined += "\n" + plugin_persona
 
     # 明确分段回复规则
     combined += "\n\n[消息分段规则]\n如果你要表达多句话，请用 |#|#| 分隔每句话，例如：\n\"今天天气真好呀|#|#|一起出去玩吗~\"\n系统会自动按 |#|#| 拆分发送。一句回复不需要分段。"
@@ -696,8 +702,11 @@ def handle(event):
     triggered = False
     bot_name = CONFIG.get("bot_name", get_bot_name())
     
-    # 关键词触发：消息中包含"依星"
-    if text and bot_name in text:
+    # 触发判定：私聊直接对话；群聊按 @ / 提及机器人名触发
+    if msg_type == "private":
+        triggered = True  # 私聊默认直接对话，无需 @ 或提及名字
+        print("[伪人] 私聊触发")
+    elif text and bot_name in text:
         print(f"[伪人] 关键词触发: {text}")
         triggered = True
     elif is_at_me(event):
@@ -707,7 +716,10 @@ def handle(event):
     has_image = len(images) > 0
 
     if not triggered:
-        # 非触发消息也记录到上下文
+        # 非触发消息：私聊全部记录；群聊默认仅记录与机器人相关的消息（回复/提及），
+        # 避免无关闲聊污染 AI 上下文（可通过 record_group_unrelated 开启全记录）
+        if msg_type == "group" and not is_reply_to_me(event) and not CONFIG.get("record_group_unrelated", False):
+            return False
         add_to_history(event, "user", text or "[图片]", triggered=triggered, has_image=has_image, user_id=user_id)
         return False
 
@@ -747,6 +759,15 @@ def handle(event):
 
         # 后处理：去掉 AI 开头的 meta 确认（如"好的，我明白了..."），仅当整句为确认时删除
         response = re.sub(r'^(?:好的[，,].*?[。！]|我知道了[。！]|收到[。！]|明白[了]?[。！])[\s]*', '', response).strip()
+        # 去重：去除完全重复的整行（AI 复读），保留首次出现
+        _seen_lines = []
+        for _line in response.split('\n'):
+            _ls = _line.strip()
+            if _ls and _ls not in _seen_lines:
+                _seen_lines.append(_ls)
+        response = '\n'.join(_seen_lines)
+        # 压缩多余空白
+        response = re.sub(r'[ \t]+', ' ', response).strip()
 
         add_to_history(event, "assistant", response, triggered=True, user_id=user_id)
 
