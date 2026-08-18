@@ -36,6 +36,7 @@ import requests
 from utils.api import send_message
 from utils.config import get_config
 from utils.plugin_toggle import is_enabled as _pt_enabled, set_enabled as _pt_set
+from utils.command_registry import CommandRegistry
 
 # ========== 路径 ==========
 PLUGIN_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -566,6 +567,89 @@ def _auto_update_loop():
         time.sleep(hours * 3600)
 
 
+# ============ 指令注册表（集中定义，一眼可读）============
+registry = CommandRegistry("JM下载")
+
+
+def _cmd_enable(event, raw, kw):
+    if event.get("message_type") == "group":
+        _pt_set(event.get("group_id"), "jm_downloader", True)
+        send_message(event, "JM下载已在本群开启")
+    else:
+        _CONFIG.setdefault("settings", {})["enabled"] = True
+        _save_config()
+        send_message(event, "JM下载已开启（全局）")
+    return True
+
+
+def _cmd_disable(event, raw, kw):
+    if event.get("message_type") == "group":
+        _pt_set(event.get("group_id"), "jm_downloader", False)
+        send_message(event, "JM下载已在本群关闭")
+    else:
+        _CONFIG.setdefault("settings", {})["enabled"] = False
+        _save_config()
+        send_message(event, "JM下载已关闭（全局）")
+    return True
+
+
+def _cmd_update(event, raw, kw):
+    def _manual_update():
+        send_message(event, "⏳ 正在检查 jmcomic 更新...")
+        new_v = check_and_update()
+        if new_v:
+            send_message(event, f"✅ jmcomic 已更新至 {new_v}")
+        else:
+            send_message(event, "jmcomic 已是最新版本（或更新失败，详见日志）")
+    threading.Thread(target=_manual_update, daemon=True).start()
+    return True
+
+
+def _cmd_detail(event, raw, kw):
+    """jm详情 <id>：只查看本子元信息"""
+    m = re.match(rf'^{re.escape(cmd("detail", "jm详情"))}\s*(\d{{3,10}})$', raw, re.I)
+    if not m:
+        return False
+    _start_task(event, [m.group(1)], detail_only=True)
+    return True
+
+
+def _cmd_download(event, raw, kw):
+    """jm <id> [id...] [p<章节>]：下载本子并转 PDF"""
+    dl = cmd("download", "jm")
+    # 仅当 jm 后跟数字 / p数字 时才接管
+    if not (raw.lower() == dl.lower()
+            or raw.lower().startswith(dl.lower() + " ")
+            or re.match(rf'^{re.escape(dl)}\s*\d', raw, re.I)):
+        return False
+    body = raw[len(dl):].strip()
+    if not body:
+        send_message(event, _l("usage"))
+        return True
+    ids = []
+    for t in body.split():
+        tl = t.lower()
+        if re.fullmatch(r'\d{3,10}', tl):
+            ids.append(tl)
+        elif re.fullmatch(r'p\d{3,10}', tl):
+            ids.append(tl)
+        else:
+            return False  # 含无关内容，不作为 jm 指令处理
+    if not ids:
+        send_message(event, _l("usage"))
+        return True
+    _start_task(event, ids)
+    return True
+
+
+# 注册指令：名称 / 触发词 / 描述 / 处理函数 / 权限 / 匹配方式
+registry.register("开启JM下载", [cmd("enable", "开启jm下载")], "开启 JM 下载（群内=本群，私聊=全局）", _cmd_enable, master_only=True, kind="suffix")
+registry.register("关闭JM下载", [cmd("disable", "关闭jm下载")], "关闭 JM 下载（群内=本群，私聊=全局）", _cmd_disable, master_only=True, kind="suffix")
+registry.register("手动更新jmcomic", ["jm更新"], "手动检查并更新 jmcomic 库", _cmd_update, master_only=True)
+registry.register("查看本子详情", [cmd("detail", "jm详情")], "仅查看本子元信息（不下载），如 jm详情 123456", _cmd_detail, kind="prefix")
+registry.register("下载本子", [cmd("download", "jm")], "下载本子并转 PDF 分享，如 jm 123456 / jm 123 456 / jm 123 p456", _cmd_download, kind="prefix")
+
+
 # ========== 主入口 ==========
 def handle(event):
     if event.get("post_type") != "message":
@@ -575,39 +659,9 @@ def handle(event):
     uid = event.get("user_id", 0)
     msg_type = event.get("message_type")
 
-    # ---- 开关命令（仅主人）----
-    if is_master(uid):
-        en_cmd = cmd("enable", "开启jm下载")
-        dis_cmd = cmd("disable", "关闭jm下载")
-        if raw == en_cmd or raw.endswith(en_cmd):
-            if msg_type == "group":
-                _pt_set(event.get("group_id"), "jm_downloader", True)
-                send_message(event, "JM下载已在本群开启")
-            else:
-                _CONFIG.setdefault("settings", {})["enabled"] = True
-                _save_config()
-                send_message(event, "JM下载已开启（全局）")
-            return True
-        if raw == dis_cmd or raw.endswith(dis_cmd):
-            if msg_type == "group":
-                _pt_set(event.get("group_id"), "jm_downloader", False)
-                send_message(event, "JM下载已在本群关闭")
-            else:
-                _CONFIG.setdefault("settings", {})["enabled"] = False
-                _save_config()
-                send_message(event, "JM下载已关闭（全局）")
-            return True
-        # 手动触发更新（仅主人）
-        if raw == "jm更新":
-            def _manual_update():
-                send_message(event, "⏳ 正在检查 jmcomic 更新...")
-                new_v = check_and_update()
-                if new_v:
-                    send_message(event, f"✅ jmcomic 已更新至 {new_v}")
-                else:
-                    send_message(event, "jmcomic 已是最新版本（或更新失败，详见日志）")
-            threading.Thread(target=_manual_update, daemon=True).start()
-            return True
+    # ---- 主人指令（开关/更新，注册表统一分发） ----
+    if registry.dispatch(event, raw, is_master(uid), master_cmds_only=True):
+        return True
 
     # ---- 全局开关 ----
     if not cfg("enabled", True):
@@ -617,42 +671,10 @@ def handle(event):
     if not raw:
         return False
 
-    dl = cmd("download", "jm")
-    dt = cmd("detail", "jm详情")
-
-    # ---- jm详情 <id> ----
-    m = re.match(rf'^{re.escape(dt)}\s*(\d{{3,10}})$', raw, re.I)
-    if m:
-        _start_task(event, [m.group(1)], detail_only=True)
+    # ---- 下载/详情指令（注册表统一分发） ----
+    if registry.dispatch(event, raw, is_master(uid)):
         return True
-
-    # ---- jm <id...> ----
-    # 仅当以 jm 开头且后面跟数字 / p数字 时才接管
-    if not (raw.lower() == dl.lower()
-            or raw.lower().startswith(dl.lower() + " ")
-            or re.match(rf'^{re.escape(dl)}\s*\d', raw, re.I)):
-        return False
-
-    body = raw[len(dl):].strip()
-    if not body:
-        send_message(event, _l("usage"))
-        return True
-
-    ids = []
-    for t in body.split():
-        tl = t.lower()
-        if re.fullmatch(r'\d{3,10}', tl):
-            ids.append(tl)
-        elif re.fullmatch(r'p\d{3,10}', tl):
-            ids.append(tl)
-        else:
-            # 含无关内容，不作为 jm 指令处理
-            return False
-    if not ids:
-        send_message(event, _l("usage"))
-        return True
-    _start_task(event, ids)
-    return True
+    return False
 
 
 # ========== 模块加载 ==========

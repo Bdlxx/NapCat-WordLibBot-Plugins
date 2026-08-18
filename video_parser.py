@@ -32,6 +32,7 @@ from utils.api import send_message, send_forward_msg
 from utils.config import get_bot_name, get_bot_qq, get_config
 from utils.http_client import http_get, HttpError
 from utils.plugin_toggle import is_enabled as _pt_enabled, set_enabled as _pt_set
+from utils.command_registry import CommandRegistry
 
 # ========== 配置 ==========
 DATA_DIR = os.path.join(os.path.dirname(__file__), "..", "data")
@@ -818,6 +819,37 @@ def is_master(user_id):
     return str(user_id) in [str(m) for m in ml]
 
 
+# ============ 指令注册表（集中定义，一眼可读）============
+registry = CommandRegistry("视频解析")
+
+
+def _cmd_enable(event, raw, kw):
+    if event.get("message_type") == "group":
+        _pt_set(event.get("group_id"), "video_parser", True)
+        send_message(event, "视频解析已在本群开启")
+    else:
+        _CONFIG["enabled"] = True
+        _save_config()
+        send_message(event, "视频解析已开启")
+    return True
+
+
+def _cmd_disable(event, raw, kw):
+    if event.get("message_type") == "group":
+        _pt_set(event.get("group_id"), "video_parser", False)
+        send_message(event, "视频解析已在本群关闭")
+    else:
+        _CONFIG["enabled"] = False
+        _save_config()
+        send_message(event, "视频解析已关闭")
+    return True
+
+
+# 注册指令：名称 / 触发词 / 描述 / 处理函数 / 权限 / 匹配方式
+registry.register("开启视频解析", ["开启视频解析"], "开启视频解析（群内=本群，私聊=全局）", _cmd_enable, master_only=True, kind="suffix")
+registry.register("关闭视频解析", ["关闭视频解析"], "关闭视频解析（群内=本群，私聊=全局）", _cmd_disable, master_only=True, kind="suffix")
+
+
 def handle(event):
     if event.get("post_type") != "message":
         return False
@@ -826,23 +858,9 @@ def handle(event):
     uid = event.get("user_id", 0)
 
 
-    if is_master(uid):
-        if raw == "开启视频解析" or raw.endswith("开启视频解析"):
-            if event.get("message_type") == "group":
-                _pt_set(event.get("group_id"), "video_parser", True)
-                send_message(event, "视频解析已在本群开启")
-            else:
-                _CONFIG["enabled"] = True; _save_config()
-                send_message(event, "视频解析已开启")
-            return True
-        if raw == "关闭视频解析" or raw.endswith("关闭视频解析"):
-            if event.get("message_type") == "group":
-                _pt_set(event.get("group_id"), "video_parser", False)
-                send_message(event, "视频解析已在本群关闭")
-            else:
-                _CONFIG["enabled"] = False; _save_config()
-                send_message(event, "视频解析已关闭")
-            return True
+    # 主人开关指令（注册表统一分发）
+    if registry.dispatch(event, raw, is_master(uid), master_cmds_only=True):
+        return True
 
     if not cfg("enabled", True):
         return False

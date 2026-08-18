@@ -22,6 +22,7 @@ import threading
 from utils.api import send_message
 from utils.config import get_config, get_bot_name
 from utils.plugin_toggle import is_enabled as _pt_enabled, set_enabled as _pt_set
+from utils.command_registry import CommandRegistry
 import os
 
 # ============ 昵称系统（带缓存）============
@@ -608,6 +609,80 @@ def save_config():
     with open(config_path, "w", encoding="utf-8") as f:
         json.dump(CONFIG, f, ensure_ascii=False, indent=2)
 
+# ============ 指令注册表（集中定义，一眼可读）============
+registry = CommandRegistry("伪人")
+
+
+def _cmd_enable(event, raw, kw):
+    if event.get("message_type") == "group":
+        _pt_set(event.get("group_id"), "pseudo", True)
+        send_message(event, "伪人已在本群开启")
+    else:
+        CONFIG["enabled"] = True
+        save_config()
+        send_message(event, "伪人已开启")
+    return True
+
+
+def _cmd_disable(event, raw, kw):
+    if event.get("message_type") == "group":
+        _pt_set(event.get("group_id"), "pseudo", False)
+        send_message(event, "伪人已在本群关闭")
+    else:
+        CONFIG["enabled"] = False
+        save_config()
+        send_message(event, "伪人已关闭")
+    return True
+
+
+def _cmd_switch_glm(event, raw, kw):
+    CONFIG["current_model"] = "glm"
+    save_config()
+    with _model_lock:
+        _active_model = None
+        _primary_fail_time = 0
+    send_message(event, msg("switch_glm", "已切换到 GLM-4V-Flash"))
+    return True
+
+
+def _cmd_switch_gemini(event, raw, kw):
+    CONFIG["current_model"] = "gemini"
+    save_config()
+    with _model_lock:
+        _active_model = None
+        _primary_fail_time = 0
+    send_message(event, msg("switch_gemini", "已切换到 Gemini 2.5 Flash"))
+    return True
+
+
+def _cmd_current_model(event, raw, kw):
+    model = CONFIG.get("current_model", "glm")
+    send_message(event, msg("current_model", "当前模型: {model}").format(model=model.upper()))
+    return True
+
+
+def _cmd_clear_history(event, raw, kw):
+    clear_history(event)
+    send_message(event, msg("history_cleared", "已清除当前会话历史"))
+    return True
+
+
+def _cmd_clear_all(event, raw, kw):
+    clear_history()
+    send_message(event, msg("all_history_cleared", "已清除所有历史"))
+    return True
+
+
+# 注册指令：名称 / 触发词 / 描述 / 处理函数 / 权限 / 匹配方式
+registry.register("开启伪人", [cmd("enable", "开启伪人")], "开启伪人（群内=本群，私聊=全局）", _cmd_enable, master_only=True, kind="suffix")
+registry.register("关闭伪人", [cmd("disable", "关闭伪人")], "关闭伪人（群内=本群，私聊=全局）", _cmd_disable, master_only=True, kind="suffix")
+registry.register("切换GLM模型", [cmd("switch_glm", "切换glm"), cmd("switch_glm_alt", "用glm")], "把 AI 模型切换为 GLM", _cmd_switch_glm, master_only=True)
+registry.register("切换Gemini模型", [cmd("switch_gemini", "切换gemini"), cmd("switch_gemini_alt", "用gemini")], "把 AI 模型切换为 Gemini", _cmd_switch_gemini, master_only=True)
+registry.register("查看当前模型", [cmd("current_model", "当前模型"), cmd("current_model_alt", "用什么模型")], "查看当前使用的 AI 模型", _cmd_current_model, master_only=True)
+registry.register("清除会话历史", [cmd("clear_history", "清除历史"), cmd("clear_history_alt", "清空历史"), cmd("clear_history_alt2", "清空记忆")], "清除当前会话的对话历史", _cmd_clear_history, master_only=True)
+registry.register("清除所有历史", [cmd("clear_all", "清除所有历史"), cmd("clear_all_alt", "清空所有历史"), cmd("clear_all_alt2", "清空所有记忆")], "清除全部会话的对话历史", _cmd_clear_all, master_only=True)
+
+
 def handle(event):
     """插件入口"""
     global _active_model, _primary_fail_time
@@ -625,29 +700,9 @@ def handle(event):
         print(f"[伪人] 过滤自消息: user_id={user_id}")
         return False
 
-    # ===== 主人专属命令（含全局开关） =====
-    if is_master(event):
-        t = text.strip()
-        enable_cmd = cmd("enable", "开启伪人")
-        disable_cmd = cmd("disable", "关闭伪人")
-        if t == enable_cmd or t.endswith(enable_cmd):
-            if msg_type == "group":
-                _pt_set(event.get("group_id"), "pseudo", True)
-                send_message(event, "伪人已在本群开启")
-            else:
-                CONFIG["enabled"] = True
-                save_config()
-                send_message(event, "伪人已开启")
-            return True
-        if t == disable_cmd or t.endswith(disable_cmd):
-            if msg_type == "group":
-                _pt_set(event.get("group_id"), "pseudo", False)
-                send_message(event, "伪人已在本群关闭")
-            else:
-                CONFIG["enabled"] = False
-                save_config()
-                send_message(event, "伪人已关闭")
-            return True
+    # ===== 主人指令（开关类，注册表统一分发） =====
+    if registry.dispatch(event, text, is_master(event), master_cmds_only=True):
+        return True
 
     if not CONFIG.get("enabled", True):
         return False
@@ -655,46 +710,11 @@ def handle(event):
     if msg_type == "group" and not _pt_enabled(event.get("group_id"), "pseudo"):
         return False
 
+    # ===== 主人管理指令（模型切换/历史清理，需 @ 机器人触发，注册表统一分发） =====
     if is_master(event) and is_at_me(event):
-        cmd_text = text.strip()
-
-        # 切换模型（同时重置容错状态，线程安全）
-        if cmd_text in [cmd("switch_glm", "切换glm"), cmd("switch_glm_alt", "用glm")]:
-            CONFIG["current_model"] = "glm"
-            save_config()
-            with _model_lock:
-                _active_model = None
-                _primary_fail_time = 0
-            send_message(event, msg("switch_glm", "已切换到 GLM-4V-Flash"))
+        if registry.dispatch(event, text, True):
             return True
 
-        if cmd_text in [cmd("switch_gemini", "切换gemini"), cmd("switch_gemini_alt", "用gemini")]:
-            CONFIG["current_model"] = "gemini"
-            save_config()
-            with _model_lock:
-                _active_model = None
-                _primary_fail_time = 0
-            send_message(event, msg("switch_gemini", "已切换到 Gemini 2.5 Flash"))
-            return True
-
-        # 查看当前模型
-        if cmd_text in [cmd("current_model", "当前模型"), cmd("current_model_alt", "用什么模型")]:
-            model = CONFIG.get("current_model", "glm")
-            send_message(event, msg("current_model", "当前模型: {model}").format(model=model.upper()))
-            return True
-
-        # 清除历史
-        if cmd_text in [cmd("clear_history", "清除历史"), cmd("clear_history_alt", "清空历史"), cmd("clear_history_alt2", "清空记忆")]:
-            clear_history(event)
-            send_message(event, msg("history_cleared", "已清除当前会话历史"))
-            return True
-
-        # 清除所有历史
-        if cmd_text in [cmd("clear_all", "清除所有历史"), cmd("clear_all_alt", "清空所有历史"), cmd("clear_all_alt2", "清空所有记忆")]:
-            clear_history()
-            send_message(event, msg("all_history_cleared", "已清除所有历史"))
-            return True
-    
     if not text and not images:
         return False
     

@@ -12,6 +12,7 @@ sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 from utils.api import send_message
 from utils.config import get_config, get_master_qq, get_napcat_http, get_access_token
 from utils.plugin_toggle import is_enabled as _pt_enabled, set_enabled as _pt_set
+from utils.command_registry import CommandRegistry
 
 # ========== 头像缓存（规避 NapCat 下载 qlogo 超时）==========
 _CACHE_DIR = None
@@ -408,6 +409,83 @@ def handle_set_cd(event):
         send_message(event, rep("not_number", "请输入数字。"))
     return True
 
+# ============ 指令注册表（集中定义，一眼可读）============
+registry = CommandRegistry("结婚")
+
+
+def _cmd_enable(event, raw, kw):
+    if event.get("message_type") == "group":
+        _pt_set(event.get("group_id"), "marry", True)
+        send_message(event, "结婚已在本群开启")
+    else:
+        _CFG.setdefault("settings", {})["enabled"] = True
+        _save()
+        send_message(event, "结婚已开启")
+    return True
+
+
+def _cmd_disable(event, raw, kw):
+    if event.get("message_type") == "group":
+        _pt_set(event.get("group_id"), "marry", False)
+        send_message(event, "结婚已在本群关闭")
+    else:
+        _CFG.setdefault("settings", {})["enabled"] = False
+        _save()
+        send_message(event, "结婚已关闭")
+    return True
+
+
+def _cmd_set_prob(event, raw, kw):
+    return handle_set_prob(event)
+
+
+def _cmd_set_cd(event, raw, kw):
+    return handle_set_cd(event)
+
+
+def _cmd_marry(event, raw, kw):
+    return handle_marriage(event, mode="娶")
+
+
+def _cmd_marry_f(event, raw, kw):
+    return handle_marriage(event, mode="嫁")
+
+
+def _cmd_marry_t(event, raw, kw):
+    at_qq = extract_at(event)
+    if at_qq is None:
+        return False
+    return handle_marriage(event, at_qq, mode="娶")
+
+
+def _cmd_marry_ft(event, raw, kw):
+    at_qq = extract_at(event)
+    if at_qq is None:
+        return False
+    return handle_marriage(event, at_qq, mode="嫁")
+
+
+def _cmd_divorce(event, raw, kw):
+    return handle_divorce(event)
+
+
+def _cmd_my_object(event, raw, kw):
+    return handle_my_object(event)
+
+
+# 注册指令：名称 / 触发词 / 描述 / 处理函数 / 权限 / 匹配方式
+registry.register("开启结婚", [cmd("enable", "开启结婚")], "开启结婚系统（群内=本群，私聊=全局）", _cmd_enable, master_only=True, kind="suffix")
+registry.register("关闭结婚", [cmd("disable", "关闭结婚")], "关闭结婚系统（群内=本群，私聊=全局）", _cmd_disable, master_only=True, kind="suffix")
+registry.register("设置结婚概率", [cmd("set_prob", "设置结婚概率")], "设置结婚成功率（如：设置结婚概率 80）", _cmd_set_prob, master_only=True, kind="prefix")
+registry.register("设置离婚CD", [cmd("set_cd", "设置离婚CD")], "设置离婚冷却时间（如：设置离婚CD 24）", _cmd_set_cd, master_only=True, kind="prefix")
+registry.register("娶群友", [cmd("marry", "娶群友")], "在群里娶群友", _cmd_marry)
+registry.register("嫁群友", [cmd("marry_f", "嫁群友")], "在群里嫁群友", _cmd_marry_f)
+registry.register("指定娶", [cmd("marry_t", "娶")], "娶指定的人（如：娶 @某人）", _cmd_marry_t, kind="prefix")
+registry.register("指定嫁", [cmd("marry_ft", "嫁")], "嫁给指定的人（如：嫁 @某人）", _cmd_marry_ft, kind="prefix")
+registry.register("闹离婚", [cmd("divorce", "闹离婚")], "与对象离婚", _cmd_divorce)
+registry.register("我的对象", [cmd("my_object", "我的对象")], "查看当前对象", _cmd_my_object)
+
+
 def handle(event):
     if event.get("post_type") != "message" or event.get("message_type") != "group":
         return False
@@ -416,28 +494,9 @@ def handle(event):
     user_id = event.get("user_id")
 
     _l()
-    # 主人开关命令
-    if is_master(user_id):
-        enable_cmd = cmd("enable", "开启结婚")
-        disable_cmd = cmd("disable", "关闭结婚")
-        if raw_msg == enable_cmd or raw_msg.endswith(enable_cmd):
-            if event.get("message_type") == "group":
-                _pt_set(event.get("group_id"), "marry", True)
-                send_message(event, "结婚已在本群开启")
-            else:
-                _CFG.setdefault("settings", {})["enabled"] = True
-                _save()
-                send_message(event, "结婚已开启")
-            return True
-        if raw_msg == disable_cmd or raw_msg.endswith(disable_cmd):
-            if event.get("message_type") == "group":
-                _pt_set(event.get("group_id"), "marry", False)
-                send_message(event, "结婚已在本群关闭")
-            else:
-                _CFG.setdefault("settings", {})["enabled"] = False
-                _save()
-                send_message(event, "结婚已关闭")
-            return True
+    # 主人指令（开关/设置，注册表统一分发）
+    if registry.dispatch(event, raw_msg, is_master(user_id), master_cmds_only=True):
+        return True
 
     if not setting("enabled", True):
         return False
@@ -445,26 +504,8 @@ def handle(event):
     if event.get("message_type") == "group" and not _pt_enabled(event.get("group_id"), "marry"):
         return False
 
-    if raw_msg.startswith(cmd("set_prob", "设置结婚概率")):
-        return handle_set_prob(event)
-    if raw_msg.startswith(cmd("set_cd", "设置离婚CD")):
-        return handle_set_cd(event)
-
-    if raw_msg == cmd("marry", "娶群友"):
-        return handle_marriage(event, mode="娶")
-    if raw_msg == cmd("marry_f", "嫁群友"):
-        return handle_marriage(event, mode="嫁")
-
-    at_qq = extract_at(event)
-    if raw_msg.startswith(cmd("marry_t", "娶")) and at_qq is not None:
-        return handle_marriage(event, at_qq, mode="娶")
-    if raw_msg.startswith(cmd("marry_ft", "嫁")) and at_qq is not None:
-        return handle_marriage(event, at_qq, mode="嫁")
-
-    if raw_msg == cmd("divorce", "闹离婚"):
-        return handle_divorce(event)
-    if raw_msg == cmd("my_object", "我的对象"):
-        return handle_my_object(event)
-
+    # 玩家指令（娶/嫁/离婚/我的对象，注册表统一分发）
+    if registry.dispatch(event, raw_msg, is_master(user_id)):
+        return True
     return False
 
