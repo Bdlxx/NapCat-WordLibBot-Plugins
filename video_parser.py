@@ -126,7 +126,23 @@ def _save_config():
     with open(CONFIG_FILE, "w", encoding="utf-8") as f:
         json.dump(_CONFIG, f, ensure_ascii=False, indent=2)
 
+_CONFIG_MTIME = 0
+
+
+def _ensure_fresh():
+    """配置热更新：配置文件变化时自动重新加载（无需重启 Bot）"""
+    global _CONFIG, _CONFIG_MTIME
+    try:
+        mtime = os.stat(CONFIG_FILE).st_mtime_ns
+        if mtime != _CONFIG_MTIME:
+            _CONFIG_MTIME = mtime
+            _load_config()
+    except Exception:
+        pass
+
+
 def cfg(key, default=None):
+    _ensure_fresh()
     return _CONFIG.get(key, default)
 
 _load_config()

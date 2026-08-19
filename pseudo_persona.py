@@ -220,6 +220,21 @@ def load_config():
     except Exception as e:
         print(f"[伪人] 加载配置失败: {e}")
 
+# 配置热更新（文件变化自动重载，无需重启 Bot）
+_PERSONA_CFG_PATH = os.path.join(os.path.dirname(__file__), "..", "data", "persona_config.json")
+_PERSONA_CFG_MTIME = 0
+
+
+def _ensure_fresh():
+    global _PERSONA_CFG_MTIME
+    try:
+        mtime = os.stat(_PERSONA_CFG_PATH).st_mtime_ns
+        if mtime != _PERSONA_CFG_MTIME:
+            _PERSONA_CFG_MTIME = mtime
+            load_config()
+    except Exception:
+        pass
+
 load_config()
 
 # ============ 模型容错状态（运行时不写入文件）============
@@ -690,6 +705,7 @@ save_config()
 def handle(event):
     """插件入口"""
     global _active_model, _primary_fail_time
+    _ensure_fresh()  # 配置热更新
     msg_type = event.get("message_type")
     if msg_type not in ["group", "private"]:
         return False

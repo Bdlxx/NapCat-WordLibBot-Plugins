@@ -117,18 +117,36 @@ def _save_config():
         print(f"[JM下载] 配置保存失败: {e}")
 
 
+_CONFIG_MTIME = 0
+
+
+def _ensure_fresh():
+    """配置热更新：配置文件变化时自动重新加载（无需重启 Bot）"""
+    global _CONFIG, _CONFIG_MTIME
+    try:
+        mtime = os.stat(CONFIG_FILE).st_mtime_ns
+        if mtime != _CONFIG_MTIME:
+            _CONFIG_MTIME = mtime
+            _load_config()
+    except Exception:
+        pass
+
+
 def cfg(key, default=None):
     """读取设置：优先 settings 段（Web面板格式），兼容顶层旧写法"""
+    _ensure_fresh()
     if "settings" in _CONFIG and key in _CONFIG["settings"]:
         return _CONFIG["settings"].get(key, default)
     return _CONFIG.get(key, default)
 
 
 def cmd(key, default=None):
+    _ensure_fresh()
     return _CONFIG.get("commands", {}).get(key, default) or default
 
 
 def _l(key, default=""):
+    _ensure_fresh()
     return _CONFIG.get("messages", {}).get(key, default) or default
 
 
