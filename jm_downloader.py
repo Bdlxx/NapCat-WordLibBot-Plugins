@@ -711,14 +711,9 @@ def handle(event):
 _load_config()
 
 
-def _cfg_watchdog():
-    """配置热更新定时器：每 5 秒检查配置文件，变化自动重载（保存后自动生效）"""
-    while True:
-        _ensure_fresh()
-        time.sleep(5)
-
-
-threading.Thread(target=_cfg_watchdog, daemon=True).start()
+def reload_config():
+    """Web 端保存配置后由主程序（SIGUSR1）通知调用，立即重新加载配置"""
+    _load_config()
 
 # 启动自动更新后台线程
 if cfg("auto_update", True):

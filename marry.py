@@ -103,13 +103,10 @@ def _ensure_fresh():
         pass
 
 
-def _cfg_watchdog():
-    while True:
-        _ensure_fresh()
-        time.sleep(5)
+def reload_config():
+    """Web 端保存配置后由主程序（SIGUSR1）通知调用，立即重新加载配置"""
+    _load_cfg()
 
-
-threading.Thread(target=_cfg_watchdog, daemon=True).start()
 _load_cfg()
 
 def cmd(k, d=None):

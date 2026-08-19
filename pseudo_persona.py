@@ -236,14 +236,9 @@ def _ensure_fresh():
         pass
 
 
-def _cfg_watchdog():
-    """配置热更新定时器：每 5 秒检查配置文件，变化自动重载（处理消息零开销）"""
-    while True:
-        _ensure_fresh()
-        time.sleep(5)
-
-
-threading.Thread(target=_cfg_watchdog, daemon=True).start()
+def reload_config():
+    """Web 端保存配置后由主程序（SIGUSR1）通知调用，立即重新加载配置"""
+    load_config()
 
 load_config()
 
