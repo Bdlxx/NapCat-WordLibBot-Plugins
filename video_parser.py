@@ -115,7 +115,7 @@ def _load_config():
             with open(CONFIG_FILE, "r", encoding="utf-8") as f:
                 _CONFIG = json.load(f)
         except:
-            _CONFIG = {}
+            pass  # 解析失败保留旧配置
     else:
         _CONFIG = {}
     for k, v in DEFAULT_CONFIG.items():
@@ -142,11 +142,21 @@ def _ensure_fresh():
 
 
 def cfg(key, default=None):
-    _ensure_fresh()
+    """直接用内存值（后台定时器负责热更新，处理消息零开销）"""
     return _CONFIG.get(key, default)
 
 _load_config()
 _load_result_cache()
+
+
+def _cfg_watchdog():
+    """配置热更新定时器：每 5 秒检查配置文件，变化自动重载"""
+    while True:
+        _ensure_fresh()
+        time.sleep(5)
+
+
+threading.Thread(target=_cfg_watchdog, daemon=True).start()
 
 # ========== 视频下载到本地缓存（绕过CDN防盗链）==========
 BOT_QQ_STR = str(get_config("BOT_QQ", 0))

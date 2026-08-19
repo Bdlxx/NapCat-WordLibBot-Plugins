@@ -235,6 +235,16 @@ def _ensure_fresh():
     except Exception:
         pass
 
+
+def _cfg_watchdog():
+    """配置热更新定时器：每 5 秒检查配置文件，变化自动重载（处理消息零开销）"""
+    while True:
+        _ensure_fresh()
+        time.sleep(5)
+
+
+threading.Thread(target=_cfg_watchdog, daemon=True).start()
+
 load_config()
 
 # ============ 模型容错状态（运行时不写入文件）============
@@ -705,7 +715,6 @@ save_config()
 def handle(event):
     """插件入口"""
     global _active_model, _primary_fail_time
-    _ensure_fresh()  # 配置热更新
     msg_type = event.get("message_type")
     if msg_type not in ["group", "private"]:
         return False

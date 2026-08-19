@@ -96,7 +96,7 @@ def _load_config():
             with open(CONFIG_FILE, "r", encoding="utf-8") as f:
                 _CONFIG = json.load(f)
         except Exception:
-            _CONFIG = {}
+            pass  # 解析失败（如写文件竞态）保留旧配置，下轮重试
     else:
         _CONFIG = {}
     for k, v in DEFAULT_CONFIG.items():
@@ -133,20 +133,17 @@ def _ensure_fresh():
 
 
 def cfg(key, default=None):
-    """读取设置：优先 settings 段（Web面板格式），兼容顶层旧写法"""
-    _ensure_fresh()
+    """读取设置：直接用内存值（后台定时器负责热更新，处理消息零开销）"""
     if "settings" in _CONFIG and key in _CONFIG["settings"]:
         return _CONFIG["settings"].get(key, default)
     return _CONFIG.get(key, default)
 
 
 def cmd(key, default=None):
-    _ensure_fresh()
     return _CONFIG.get("commands", {}).get(key, default) or default
 
 
 def _l(key, default=""):
-    _ensure_fresh()
     return _CONFIG.get("messages", {}).get(key, default) or default
 
 
@@ -701,6 +698,16 @@ def handle(event):
 
 # ========== 模块加载 ==========
 _load_config()
+
+
+def _cfg_watchdog():
+    """配置热更新定时器：每 5 秒检查配置文件，变化自动重载（保存后自动生效）"""
+    while True:
+        _ensure_fresh()
+        time.sleep(5)
+
+
+threading.Thread(target=_cfg_watchdog, daemon=True).start()
 
 # 启动自动更新后台线程
 if cfg("auto_update", True):
