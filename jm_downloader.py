@@ -69,7 +69,7 @@ DEFAULT_CONFIG = {
         "recall_seconds": 30,            # 前置消息撤回时间（秒）
         "recall_prefix_seconds": 30,     # 前置消息（查询/详情/进度等）撤回时间（秒）
         "recall_pdf_seconds": 60,        # PDF 文件撤回时间（秒）
-        "recall_notice": True,           # 撤回前提醒（整套消息只提醒一次）
+        "recall_notice": False,          # 前置消息撤回提醒（默认关闭，仅PDF完成后提醒）
     },
     "messages": {
         "usage": "📖 用法：\njm <本子id> 下载整个本子，例：jm 123456\njm 123 456 多本下载\njm 123 p456 只下载某章节\njm详情 123456 查看本子信息（不下载）",
@@ -277,8 +277,8 @@ def _run_task(event, ids, detail_only):
     yml_path = result_path = None
     recall_list = []  # 本任务发送的消息 id（用于整套撤回）
     try:
-        # 撤回提醒（整套只提醒一次）
-        if cfg("recall_enabled", False) and cfg("recall_notice", True):
+        # 前置消息撤回提醒（默认关闭；开启时仅发一次，PDF 完成提醒始终保留）
+        if cfg("recall_enabled", False) and cfg("recall_notice", False):
             _recall_send(event, _l("recall_notice").format(
                 prefix=int(cfg("recall_prefix_seconds", 30)),
                 pdf=int(cfg("recall_pdf_seconds", 60))), recall_list)
