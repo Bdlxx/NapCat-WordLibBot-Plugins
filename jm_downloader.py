@@ -66,7 +66,9 @@ DEFAULT_CONFIG = {
         "task_timeout_seconds": 1800,    # 单次下载超时（秒）
         "cleanup_delay_seconds": 600,    # 发送文件后延迟清理的时间（秒）。NapCat 是异步读取文件，不能立即删除
         "recall_enabled": False,         # 发送的消息自动撤回（后台开关）
-        "recall_seconds": 120,           # 撤回时间（秒，QQ 限制 2 分钟内可撤回）
+        "recall_seconds": 30,            # 前置消息撤回时间（秒）
+        "recall_prefix_seconds": 30,     # 前置消息（查询/详情/进度等）撤回时间（秒）
+        "recall_pdf_seconds": 60,        # PDF 文件撤回时间（秒）
         "recall_notice": True,           # 撤回前提醒（整套消息只提醒一次）
     },
     "messages": {
@@ -79,7 +81,8 @@ DEFAULT_CONFIG = {
         "timeout": "⏰ 下载超时已终止，请稍后重试",
         "pdf_header": "📚 《{titles}》PDF 分享：\n文件较大，发送需要一点时间，请稍候…",
         "detail_header": "📖 《{title}》\n🆔 JM{album_id}\n✍️ 作者：{authors}\n📄 章节数：{episodes}{pages}\n🏷️ 标签：{tags}\n🕒 更新：{update_date}",
-        "recall_notice": "🔇 本次 JM 下载的整套消息将在 {seconds} 秒后自动撤回",
+        "recall_notice": "🔇 本次 JM 下载的前置消息将在 {prefix} 秒后自动撤回，PDF 文件将在 {pdf} 秒后撤回",
+        "recall_pdf_notice": "📄 PDF 已发送完成，将在 {seconds} 秒后自动撤回",
     },
 }
 
@@ -236,17 +239,19 @@ def _schedule_recall(message_id, seconds):
     t.start()
 
 
-def _recall_send(event, message, recall_list=None):
+def _recall_send(event, message, recall_list=None, seconds=None):
     """统一发送入口：
     - 开启撤回：HTTP 发送并记录 message_id 定时撤回；HTTP 失败退回 WS（不撤回）
     - 未开启：走原有 WS 发送
+    - seconds: 指定撤回时间；None 时用前置消息时间（recall_prefix_seconds）
     """
     if cfg("recall_enabled", False):
         mid = _http_send_msg(event, message)
         if mid is not None:
             if recall_list is not None:
                 recall_list.append(mid)
-            _schedule_recall(mid, cfg("recall_seconds", 120))
+            secs = seconds if seconds is not None else cfg("recall_prefix_seconds", cfg("recall_seconds", 30))
+            _schedule_recall(mid, secs)
             return
         # HTTP 失败退回 WS
         send_message(event, message)
@@ -274,7 +279,9 @@ def _run_task(event, ids, detail_only):
     try:
         # 撤回提醒（整套只提醒一次）
         if cfg("recall_enabled", False) and cfg("recall_notice", True):
-            _recall_send(event, _l("recall_notice").format(seconds=int(cfg("recall_seconds", 120))), recall_list)
+            _recall_send(event, _l("recall_notice").format(
+                prefix=int(cfg("recall_prefix_seconds", 30)),
+                pdf=int(cfg("recall_pdf_seconds", 60))), recall_list)
         _recall_send(event, _l("querying").format(ids="、".join(ids)), recall_list)
         print(f"[JM下载] 任务开始 group={group_id} ids={ids} detail_only={detail_only}")
 
@@ -480,15 +487,19 @@ def _send_pdfs(event, result, task_id=None, recall_list=None):
     titles = []
     for r in result.get("results", []):
         titles.append(r.get("title") or r.get("album_id") or "?")
-    _recall_send(event, _l("pdf_header").format(titles="、".join(titles)), recall_list)
+    pdf_secs = int(cfg("recall_pdf_seconds", 60))
+    _recall_send(event, _l("pdf_header").format(titles="、".join(titles)), recall_list, seconds=pdf_secs)
     time.sleep(0.5)
 
     for dest, container_path in sent:
         try:
-            _recall_send(event, [{"type": "file", "data": {"file": container_path}}], recall_list)
+            _recall_send(event, [{"type": "file", "data": {"file": container_path}}], recall_list, seconds=pdf_secs)
         except Exception as e:
             print(f"[JM下载] 发送PDF失败 {container_path}: {e}")
         time.sleep(1.5)
+
+    # PDF 发送完成提醒（1 分钟后随 PDF 一起撤回）
+    _recall_send(event, _l("recall_pdf_notice").format(seconds=pdf_secs), recall_list, seconds=pdf_secs)
 
     # 清理：延迟执行（NapCat 收到 sendMsg 后异步读取文件上传，立即删除会导致发送失败）
     if cfg("delete_after_send", True):
