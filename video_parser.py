@@ -165,8 +165,11 @@ else:
 CONTAINER_CACHE_PATH = "/app/cache/images"
 os.makedirs(CACHE_DIR, exist_ok=True)
 
-def download_video_to_cache(url, referer="https://www.douyin.com/"):
-    """下载视频到 NapCat 缓存目录，返回容器内路径"""
+def download_video_to_cache(url, referer="https://www.douyin.com/", max_retries=3):
+    """下载视频到 NapCat 缓存目录，返回容器内路径。
+    支持断点续传（Range）与失败重试：大视频（几十MB+）单次流式下载易被
+    B 站 CDN 中断（IncompleteRead），中断后从已下载字节数继续，多次仍失败则
+    返回 '' 表示下载失败（调用方不应回退发直链——B 站直链 NapCat 下载会 Forbidden）。"""
     import hashlib
     # 类型安全：确保 url 是字符串
     if not isinstance(url, str):
@@ -182,32 +185,56 @@ def download_video_to_cache(url, referer="https://www.douyin.com/"):
         return container_path
 
     print(f"[视频解析] 下载视频到缓存: {filename}")
-    try:
-        headers = {
-            'User-Agent': _UA,
-            'Referer': referer,
-            'Accept': '*/*',
-            'Accept-Encoding': 'identity',
-            'Connection': 'keep-alive',
-        }
-        r = requests.get(url, headers=headers, timeout=30, stream=True)
-        if r.status_code != 200:
-            print(f"[视频解析] 下载失败 HTTP {r.status_code}")
-            return url
-        with open(filepath, 'wb') as f:
-            for chunk in r.iter_content(chunk_size=8192):
-                if chunk:
-                    f.write(chunk)
-        size_mb = os.path.getsize(filepath) / 1024 / 1024
-        print(f"[视频解析] 下载完成: {filename} ({size_mb:.1f}MB)")
-        if size_mb < 0.05:
-            print(f"[视频解析] 视频过小(仅{size_mb:.3f}MB)，改用直链发送")
-            os.remove(filepath)
-            return url
-        return container_path
-    except Exception as e:
-        print(f"[视频解析] 下载异常: {e}")
-        return url
+    base_headers = {
+        'User-Agent': _UA,
+        'Referer': referer,
+        'Accept': '*/*',
+        'Accept-Encoding': 'identity',
+        'Connection': 'keep-alive',
+    }
+    # 已下载字节数（断点续传用）
+    downloaded = 0
+    if os.path.exists(filepath):
+        downloaded = os.path.getsize(filepath)
+
+    for attempt in range(1, max_retries + 1):
+        try:
+            headers = dict(base_headers)
+            if downloaded > 0:
+                headers['Range'] = f'bytes={downloaded}-'
+            r = requests.get(url, headers=headers, timeout=120, stream=True)
+            if r.status_code == 416:  # Range 越界（已下完）
+                size_mb = downloaded / 1024 / 1024
+                print(f"[视频解析] 下载完成: {filename} ({size_mb:.1f}MB)")
+                return container_path if size_mb >= 0.05 else ''
+            if r.status_code not in (200, 206):
+                print(f"[视频解析] 下载失败 HTTP {r.status_code} (第{attempt}次)")
+                return ''
+            mode = 'ab' if r.status_code == 206 and downloaded > 0 else 'wb'
+            if mode == 'wb':
+                downloaded = 0
+            with open(filepath, mode) as f:
+                for chunk in r.iter_content(chunk_size=8192):
+                    if chunk:
+                        f.write(chunk)
+                        downloaded += len(chunk)
+            size_mb = downloaded / 1024 / 1024
+            print(f"[视频解析] 下载完成: {filename} ({size_mb:.1f}MB)")
+            if size_mb < 0.05:
+                print(f"[视频解析] 视频过小(仅{size_mb:.3f}MB)")
+                try: os.remove(filepath)
+                except Exception: pass
+                return ''
+            return container_path
+        except Exception as e:
+            print(f"[视频解析] 下载异常(第{attempt}/{max_retries}次): {e}")
+            # 已下载的部分保留，下次从断点继续
+            if os.path.exists(filepath):
+                downloaded = os.path.getsize(filepath)
+            if attempt < max_retries:
+                time.sleep(2 * attempt)
+    print(f"[视频解析] 下载失败（已重试 {max_retries} 次），放弃")
+    return ''
 
 
 # ========== 平台匹配 ==========
@@ -960,12 +987,18 @@ def handle(event):
         plat_ref = 'https://www.bilibili.com/' if platform == '哔哩哔哩' else 'https://www.tiktok.com/'
         print(f"[视频解析] {platform} 下载到缓存...")
         cached_list = []
+        download_failed = False
         for vu in video_list:
             local = download_video_to_cache(vu, plat_ref)
             if local and not local.startswith('http'):
                 cached_list.append(local)
             else:
-                cached_list.append(vu)
+                # 下载失败：不再回退发直链（B 站直链 NapCat 下载会 Forbidden）
+                download_failed = True
+                print(f"[视频解析] {platform} 视频下载失败，无法发送")
+        if download_failed and not cached_list:
+            send_message(event, f"⚠️ {platform}视频下载失败，请稍后再试")
+            return True
         video_list = cached_list
 
     # 单视频（无图片）直发，多视频/图文合集合并转发
