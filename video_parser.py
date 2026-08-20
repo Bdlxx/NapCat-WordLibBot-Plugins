@@ -251,6 +251,28 @@ def extract_url(text):
     return None, None
 
 
+def collect_card_text(event, raw):
+    """从事件消息段收集文本/链接，支持 QQ 分享卡片（CQ:share / CQ:json）。
+    JSON 卡片中的 URL 带 \\/ 转义或 &#47; 实体，统一还原后再做平台匹配。"""
+    import html as _html
+    parts = []
+    for seg in event.get("message", []) or []:
+        st = seg.get("type", "")
+        sd = seg.get("data", {}) or {}
+        if st == "text":
+            parts.append(sd.get("text", ""))
+        elif st == "share":
+            parts.append(sd.get("url", ""))
+        elif st == "json":
+            parts.append(sd.get("data", ""))
+    parts.append(raw)
+    text = "\n".join(x for x in parts if x)
+    text = _html.unescape(text)
+    # 还原 JSON 转义（\\/）与 HTML 实体斜杠（&#47;）
+    text = text.replace('\\/', '/').replace('&#47;', '/')
+    return text
+
+
 def _req_headers(referer=None):
     h = {'User-Agent': _UA}
     if referer:
@@ -898,10 +920,8 @@ def handle(event):
     if not raw:
         return False
 
-    # 从 message 段提取 URL（支持 QQ 分享卡片）
-    import html as _html
-    # 直接 HTML 解码后作为提取文本（JSON 卡片中的 URL 在 HTML 实体中）
-    extracted_text = _html.unescape(raw)
+    # 从 message 段提取 URL（支持 QQ 分享卡片：CQ:share / CQ:json）
+    extracted_text = collect_card_text(event, raw)
     url, platform = extract_url(extracted_text)
     if not url or not platform:
         return False
