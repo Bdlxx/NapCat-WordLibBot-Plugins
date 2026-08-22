@@ -23,6 +23,7 @@ from utils.api import send_message
 from utils.config import get_config, get_bot_name
 from utils.plugin_toggle import is_enabled as _pt_enabled, set_enabled as _pt_set
 from utils.command_registry import CommandRegistry
+from utils.log import log as _log
 import os
 
 # ============ 昵称系统（带缓存）============
@@ -721,7 +722,8 @@ def handle(event):
     # 不响应机器人自己发出的消息（优先使用 event.self_id）
     self_id = str(event.get("self_id", get_config("BOT_QQ", 0)))
     if str(user_id) == self_id:
-        print(f"[伪人] 过滤自消息: user_id={user_id}")
+        # debug 级：默认不显示（插件未生效/未处理时无需提示过滤）
+        _log('debug', f'过滤自消息: user_id={user_id}')
         return False
 
     # ===== 主人指令（开关类，注册表统一分发） =====
