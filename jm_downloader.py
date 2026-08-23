@@ -68,7 +68,8 @@ DEFAULT_CONFIG = {
         "recall_enabled": False,         # 发送的消息自动撤回（后台开关）
         "recall_seconds": 30,            # 前置消息撤回时间（秒）
         "recall_prefix_seconds": 30,     # 前置消息（查询/详情/进度等）撤回时间（秒）
-        "recall_pdf_seconds": 60,        # PDF 文件撤回时间（秒）
+        "recall_pdf_seconds": 60,        # PDF 完成提醒撤回时间（秒）
+        "recall_file_seconds": 300,      # PDF 文件消息撤回时间（秒）：文件发送/上传耗时较长，撤回窗口放宽到 5 分钟
         "recall_notice": False,          # 前置消息撤回提醒（默认关闭，仅PDF完成后提醒）
     },
     "messages": {
@@ -202,7 +203,9 @@ plugins:
 # ========== 消息撤回 ==========
 def _http_send_msg(event, message, timeout=30):
     """通过 NapCat HTTP 发送消息并返回 message_id（用于撤回/确认真实发送成功）。
-    timeout 默认 30s：发送文件等大消息时 NapCat 需读取文件并上传，10s 可能不够"""
+    timeout 默认 30s：发送文件等大消息时 NapCat 需读取文件并上传，10s 可能不够。
+    access_token 放 query 参数（NapCat HTTP 认证在 query/header，body 不识别）；
+    消息体用 POST JSON（文件消息段用 GET 传参会报「未知的消息类型：undefined」）"""
     try:
         import requests as _req
         url = str(get_config("NAPCAT_HTTP", "http://127.0.0.1:3000")).rstrip("/")
@@ -213,8 +216,8 @@ def _http_send_msg(event, message, timeout=30):
         else:
             action, params = "send_private_msg", {"user_id": event.get("user_id")}
         params["message"] = message
-        params["access_token"] = token
-        r = _req.get(f"{url}/{action}", params=params, timeout=timeout)
+        q = f"?access_token={token}" if token else ""
+        r = _req.post(f"{url}/{action}{q}", json=params, timeout=timeout)
         data = r.json()
         if data.get("status") == "ok" and data.get("data"):
             return data["data"].get("message_id")
@@ -225,14 +228,19 @@ def _http_send_msg(event, message, timeout=30):
 
 
 def _schedule_recall(message_id, seconds):
-    """定时撤回单条消息（QQ 限制 2 分钟内可撤回）"""
+    """定时撤回单条消息（HTTP delete_msg，access_token 走 query 参数）"""
     def _do_recall():
         try:
             import requests as _req
             url = str(get_config("NAPCAT_HTTP", "http://127.0.0.1:3000")).rstrip("/")
             token = get_config("ACCESS_TOKEN", "")
-            _req.get(f"{url}/delete_msg", params={"message_id": message_id, "access_token": token}, timeout=10)
-            print(f"[JM下载] 已撤回消息 {message_id}")
+            r = _req.get(f"{url}/delete_msg",
+                         params={"message_id": message_id, "access_token": token}, timeout=15)
+            data = r.json()
+            if data.get("status") == "ok":
+                print(f"[JM下载] 已撤回消息 {message_id}")
+            else:
+                print(f"[JM下载] 撤回失败 {message_id}: {data.get('message','')[:80]}")
         except Exception as e:
             print(f"[JM下载] 撤回失败 {message_id}: {e}")
     t = threading.Timer(max(1, int(seconds)), _do_recall)
@@ -241,9 +249,9 @@ def _schedule_recall(message_id, seconds):
 
 
 def _recall_send(event, message, recall_list=None, seconds=None):
-    """统一发送入口，返回 message_id（NapCat 真实发送成功）或 None：
-    - 开启撤回：HTTP 发送并记录 message_id 定时撤回；HTTP 失败退回 WS（不撤回）
-    - 未开启：走原有 WS 发送
+    """统一发送入口：
+    - 开启撤回：HTTP 发送拿 message_id 定时撤回；HTTP 失败退回 WS（不撤回）
+    - 未开启：走 WS 发送
     - seconds: 指定撤回时间；None 时用前置消息时间（recall_prefix_seconds）
     """
     if cfg("recall_enabled", False):
@@ -494,19 +502,22 @@ def _send_pdfs(event, result, task_id=None, recall_list=None):
     _recall_send(event, _l("pdf_header").format(titles="、".join(titles)), recall_list, seconds=pdf_secs)
     time.sleep(0.5)
 
-    # PDF 文件：无论撤回是否开启都走 HTTP 发送，只有 NapCat 返回 message_id
-    # （真实发送成功）才算发出，完成提醒与撤回计时都以该时刻为基准
+    # PDF 文件：走 HTTP 发送拿 message_id（NapCat 真实发送成功）才算发出，
+    # 完成提醒与撤回计时都以该时刻为基准；HTTP 失败回退 WS 尽力发送
+    file_secs = int(cfg("recall_file_seconds", 300))  # 文件撤回窗口较长（默认 5 分钟）
     sent_ok = 0
     for dest, container_path in sent:
         try:
-            mid = _http_send_msg(event, [{"type": "file", "data": {"file": container_path}}])
+            # 文件消息上传耗时较长，超时放宽到 60s
+            mid = _http_send_msg(event, [{"type": "file", "data": {"file": container_path}}], timeout=60)
             if mid is not None:
                 sent_ok += 1
                 print(f"[JM下载] PDF发送成功: {container_path} (mid={mid})")
                 if cfg("recall_enabled", False):
                     if recall_list is not None:
                         recall_list.append(mid)
-                    _schedule_recall(mid, pdf_secs)
+                    # 文件消息撤回：从真实发送成功起，等待较长窗口（file_secs）
+                    _schedule_recall(mid, file_secs)
             else:
                 print(f"[JM下载] PDF发送失败(HTTP无返回): {container_path}")
                 # 回退 WS 尽力发送（无法确认真实发出，不参与完成提醒判定）
