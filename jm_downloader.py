@@ -498,8 +498,9 @@ def _send_pdfs(event, result, task_id=None, recall_list=None):
             print(f"[JM下载] 发送PDF失败 {container_path}: {e}")
         time.sleep(1.5)
 
-    # PDF 发送完成提醒（1 分钟后随 PDF 一起撤回）
-    _recall_send(event, _l("recall_pdf_notice").format(seconds=pdf_secs), recall_list, seconds=pdf_secs)
+    # PDF 发送完成提醒（仅在开启撤回时发送，1 分钟后随 PDF 一起撤回）
+    if cfg("recall_enabled", False):
+        _recall_send(event, _l("recall_pdf_notice").format(seconds=pdf_secs), recall_list, seconds=pdf_secs)
 
     # 清理：延迟执行（NapCat 收到 sendMsg 后异步读取文件上传，立即删除会导致发送失败）
     if cfg("delete_after_send", True):
@@ -675,10 +676,6 @@ registry.register("手动更新jmcomic", ["jm更新"], "手动检查并更新 jm
 registry.register("查看本子详情", [cmd("detail", "jm详情")], "仅查看本子元信息（不下载），如 jm详情 123456", _cmd_detail, kind="prefix")
 registry.register("下载本子", [cmd("download", "jm")], "下载本子并转 PDF 分享，如 jm 123456 / jm 123 456 / jm 123 p456", _cmd_download, kind="prefix")
 
-# 同步指令中文名到配置（Web 面板展示可读指令名）
-_CONFIG.setdefault("command_labels", {}).update(registry.labels())
-_save_config()
-
 
 # ========== 主入口 ==========
 def handle(event):
@@ -711,9 +708,20 @@ def handle(event):
 _load_config()
 
 
+def _sync_command_labels():
+    """同步指令中文名到配置（Web 面板展示可读指令名）。
+    必须在 _load_config() 之后调用，否则会覆盖磁盘上已保存的配置。"""
+    _CONFIG.setdefault("command_labels", {}).update(registry.labels())
+    _save_config()
+
+
+_sync_command_labels()
+
+
 def reload_config():
     """Web 端保存配置后由主程序（SIGUSR1）通知调用，立即重新加载配置"""
     _load_config()
+    _sync_command_labels()
 
 # 启动自动更新后台线程
 if cfg("auto_update", True):
