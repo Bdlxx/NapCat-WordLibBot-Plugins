@@ -924,6 +924,34 @@ registry.register("关闭视频解析", ["关闭视频解析"], "关闭视频解
 _CONFIG.setdefault("command_labels", {}).update(registry.labels())
 _save_config()
 
+# ========== 新解析核心接入（astrbot_plugin_parser 复刻版）==========
+try:
+    from plugins.parser_bridge import configure as _pb_configure, host_to_container, get_cache_dir
+    import video_parser_core.main as _vpm
+
+    def _pb_send(event, segs):
+        """核心解析结果 → CQ 段 → WS 发送（event 由核心传入）"""
+        from plugins.parser_bridge import segs_to_cq
+        import utils.api as _api
+        try:
+            _api.send_message(event, segs_to_cq(segs))
+            return True
+        except Exception as e:
+            print(f"[视频解析] 新核心发送失败: {e}")
+            return False
+
+    _pb_configure(_pb_send, host_to_container)
+    # 预初始化解析核心（后台线程，避免首次消息卡顿）
+    def _preinit_core():
+        try:
+            _vpm.get_plugin(send_fn=_pb_send, container_path_fn=host_to_container, cache_dir=get_cache_dir())
+            print("[视频解析] 新解析核心已预初始化")
+        except Exception as e:
+            print(f"[视频解析] 解析核心预初始化失败: {e}")
+    threading.Thread(target=_preinit_core, daemon=True).start()
+except Exception as e:
+    print(f"[视频解析] 新解析核心接入失败: {e}")
+
 
 def handle(event):
     if event.get("post_type") != "message":
@@ -946,6 +974,14 @@ def handle(event):
         return False
     if not raw:
         return False
+
+    # 尝试新解析核心（astrbot_plugin_parser 复刻版：16 平台，含 B站卡片/动态/专栏等）
+    try:
+        from plugins.parser_bridge import handle_parse
+        if handle_parse(event):
+            return True
+    except Exception as _e:
+        print(f"[视频解析] 新解析核心异常，回退旧逻辑: {_e}")
 
     # 从 message 段提取 URL（支持 QQ 分享卡片：CQ:share / CQ:json）
     extracted_text = collect_card_text(event, raw)
