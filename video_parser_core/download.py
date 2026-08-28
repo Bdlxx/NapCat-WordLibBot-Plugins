@@ -288,6 +288,18 @@ class Downloader:
             raw = await to_thread(ydl.extract_info, url, download=False)
             if not raw:
                 raise ParseException("获取视频信息失败")
+        # 兜底缺失字段（yt-dlp 在无 JS runtime/网络受限时可能缺 timestamp 等）
+        for field, default in (
+            ("timestamp", 0),
+            ("duration", 0),
+            ("thumbnail", ""),
+            ("description", ""),
+            ("channel_id", ""),
+            ("channel", ""),
+            ("uploader", ""),
+        ):
+            if raw.get(field) is None:
+                raw[field] = default
         info = convert(raw, VideoInfo)
         self.info_cache[url] = info
         return info

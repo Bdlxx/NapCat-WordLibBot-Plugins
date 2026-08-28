@@ -13,16 +13,16 @@ class _Logger:
     def info(self, msg):
         print(self._fmt("INFO", msg))
 
-    def warning(self, msg):
+    def warning(self, msg, *args, **kwargs):
         print(f"[parser] ⚠ {msg}")
 
-    def warn(self, msg):
+    def warn(self, msg, *args, **kwargs):
         print(f"[parser] ⚠ {msg}")
 
-    def error(self, msg):
+    def error(self, msg, *args, **kwargs):
         print(f"[parser] ❌ {msg}")
 
-    def exception(self, msg):
+    def exception(self, msg, *args, **kwargs):
         import traceback
         print(f"[parser] ❌ {msg}")
         traceback.print_exc()

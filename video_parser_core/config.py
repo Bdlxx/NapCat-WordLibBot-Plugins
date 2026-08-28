@@ -88,7 +88,7 @@ class PluginConfig:
             twitter=SimpleNamespace(use_proxy=False,
                 name="twitter",
                 cookies=""),
-            pixiv=SimpleNamespace(use_proxy=False, nsfw=False,
+            pixiv=SimpleNamespace(use_proxy=False, nsfw=False, max_page=0,
                 name="pixiv",
                 cookies=""),
             shipinhao=SimpleNamespace(use_proxy=False,
