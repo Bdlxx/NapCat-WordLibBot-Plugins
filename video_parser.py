@@ -65,6 +65,16 @@ DEFAULT_CONFIG = {
 _CONFIG = {}
 _browser_pool = None
 
+
+def vlog(level, msg):
+    """视频解析 分级日志"""
+    try:
+        from utils.log import plugin_log
+        plugin_log("视频解析", level, msg)
+    except Exception:
+        print(f"[视频解析] {msg}")
+
+
 # ========== 解析结果缓存池 ==========
 # key: 原始分享链接 md5 → {result, ts, video_local}
 # 同一链接多次触发时直接复用第一次的解析结果和已下载文件
@@ -93,7 +103,7 @@ def _save_result_cache():
         with open(RESULT_CACHE_FILE, "w", encoding="utf-8") as f:
             json.dump(RESULT_CACHE, f, ensure_ascii=False, indent=2)
     except Exception as e:
-        print(f"[视频解析] 缓存保存失败: {e}")
+        vlog("error", f"缓存保存失败: {e}")
 
 
 def _cache_key(url):
@@ -111,7 +121,7 @@ def _cache_get(url):
     if now - entry.get('ts', 0) > RESULT_CACHE_TTL:
         RESULT_CACHE.pop(k, None)
         return None, False
-    print(f"[视频解析] 命中解析缓存: {url[:40]}...")
+    vlog("info", f"命中解析缓存: {url[:40]}...")
     return entry.get('result'), True
 
 
@@ -185,7 +195,7 @@ def download_video_to_cache(url, referer="https://www.douyin.com/", max_retries=
     import hashlib
     # 类型安全：确保 url 是字符串
     if not isinstance(url, str):
-        print(f"[视频解析] 下载失败: url 不是字符串 ({type(url).__name__})")
+        vlog("error", f"下载失败: url 不是字符串 ({type(url).__name__})")
         return str(url) if url else ''
     url_hash = hashlib.md5(url.encode()).hexdigest()
     filename = url_hash + ".mp4"
@@ -193,10 +203,10 @@ def download_video_to_cache(url, referer="https://www.douyin.com/", max_retries=
     container_path = f"{CONTAINER_CACHE_PATH}/{filename}"
 
     if os.path.exists(filepath) and os.path.getsize(filepath) > 1024:
-        print(f"[视频解析] 使用缓存视频: {filename}")
+        vlog("info", f"使用缓存视频: {filename}")
         return container_path
 
-    print(f"[视频解析] 下载视频到缓存: {filename}")
+    vlog("info", f"下载视频到缓存: {filename}")
     base_headers = {
         'User-Agent': _UA,
         'Referer': referer,
@@ -217,10 +227,10 @@ def download_video_to_cache(url, referer="https://www.douyin.com/", max_retries=
             r = requests.get(url, headers=headers, timeout=120, stream=True)
             if r.status_code == 416:  # Range 越界（已下完）
                 size_mb = downloaded / 1024 / 1024
-                print(f"[视频解析] 下载完成: {filename} ({size_mb:.1f}MB)")
+                vlog("info", f"下载完成: {filename} ({size_mb:.1f}MB)")
                 return container_path if size_mb >= 0.05 else ''
             if r.status_code not in (200, 206):
-                print(f"[视频解析] 下载失败 HTTP {r.status_code} (第{attempt}次)")
+                vlog("error", f"下载失败 HTTP {r.status_code} (第{attempt}次)")
                 return ''
             mode = 'ab' if r.status_code == 206 and downloaded > 0 else 'wb'
             if mode == 'wb':
@@ -231,21 +241,21 @@ def download_video_to_cache(url, referer="https://www.douyin.com/", max_retries=
                         f.write(chunk)
                         downloaded += len(chunk)
             size_mb = downloaded / 1024 / 1024
-            print(f"[视频解析] 下载完成: {filename} ({size_mb:.1f}MB)")
+            vlog("info", f"下载完成: {filename} ({size_mb:.1f}MB)")
             if size_mb < 0.05:
-                print(f"[视频解析] 视频过小(仅{size_mb:.3f}MB)")
+                vlog("info", f"视频过小(仅{size_mb:.3f}MB)")
                 try: os.remove(filepath)
                 except Exception: pass
                 return ''
             return container_path
         except Exception as e:
-            print(f"[视频解析] 下载异常(第{attempt}/{max_retries}次): {e}")
+            vlog("error", f"下载异常(第{attempt}/{max_retries}次): {e}")
             # 已下载的部分保留，下次从断点继续
             if os.path.exists(filepath):
                 downloaded = os.path.getsize(filepath)
             if attempt < max_retries:
                 time.sleep(2 * attempt)
-    print(f"[视频解析] 下载失败（已重试 {max_retries} 次），放弃")
+    vlog("error", f"下载失败（已重试 {max_retries} 次），放弃")
     return ''
 
 
@@ -328,22 +338,22 @@ def _parse_bilibili_52api(url):
     headers, params = _build_52api_sign(url)
     if not headers:
         return None
-    print(f"[视频解析] 请求 52api.cn B站解析...")
+    vlog("info", f"请求 52api.cn B站解析...")
     try:
         resp = http_get(BILIBILI_API_URL, params=params, headers=headers, timeout=15)
     except HttpError as e:
-        print(f"[视频解析] 52api B站请求异常: {e}")
+        vlog("error", f"52api B站请求异常: {e}")
         return None
     code = resp.get('code')
     if code not in (200, 0):
-        print(f"[视频解析] 52api B站业务错误: {resp.get('msg','')}")
+        vlog("error", f"52api B站业务错误: {resp.get('msg','')}")
         return None
     result_data = resp.get('data', {})
     if isinstance(result_data, str):
         try:
             result_data = json.loads(result_data)
         except json.JSONDecodeError:
-            print(f"[视频解析] 52api B站 data 不是合法 JSON")
+            vlog("info", f"52api B站 data 不是合法 JSON")
             return None
     if not result_data or not isinstance(result_data, dict):
         return None
@@ -410,7 +420,7 @@ def _build_52api_sign(url):
     api_key = get_config("52api_key", "")
     api_secret = get_config("52api_secret", "")
     if not api_key or not api_secret:
-        print("[视频解析] 未配置 52api_key 或 52api_secret")
+        vlog("info", f"未配置 52api_key 或 52api_secret")
         return None, None
 
     timestamp = int(time.time())
@@ -436,19 +446,19 @@ def _parse_douyin(url):
     max_retries = 3
     for attempt in range(1, max_retries + 1):
         try:
-            print(f"[视频解析] 抖音解析 第{attempt}次尝试...")
+            vlog("info", f"抖音解析 第{attempt}次尝试...")
             result = _parse_douyin_api(url)
             if result:
-                print(f"[视频解析] 抖音第{attempt}次尝试成功")
+                vlog("info", f"抖音第{attempt}次尝试成功")
                 return result
-            print(f"[视频解析] 抖音第{attempt}次尝试返回空结果")
+            vlog("info", f"抖音第{attempt}次尝试返回空结果")
         except Exception as e:
-            print(f"[视频解析] 抖音第{attempt}次尝试异常: {e}")
+            vlog("error", f"抖音第{attempt}次尝试异常: {e}")
             import traceback
             traceback.print_exc()
         if attempt < max_retries:
             time.sleep(2)
-    print(f"[视频解析] 抖音解析失败（已重试{max_retries}次）")
+    vlog("error", f"抖音解析失败（已重试{max_retries}次）")
     return None
 
 
@@ -458,19 +468,19 @@ def _parse_douyin_api(url):
     if not headers:
         return None
 
-    print(f"[视频解析] 请求 52api.cn ...")
+    vlog("info", f"请求 52api.cn ...")
     try:
         resp = http_get(DOUYIN_API_URL, params=params, headers=headers, timeout=10)
     except HttpError as e:
-        print(f"[视频解析] 52api 请求异常: {e}")
+        vlog("error", f"52api 请求异常: {e}")
         return None
 
     code = resp.get('code')
     msg = resp.get('msg', '')
-    print(f"[视频解析] 52api 响应: code={code}, msg={msg}")
+    vlog("info", f"52api 响应: code={code}, msg={msg}")
 
     if code not in (200, 0):
-        print(f"[视频解析] 52api 业务错误: {msg}")
+        vlog("error", f"52api 业务错误: {msg}")
         return None
 
     # data 可能是 dict 或 JSON 字符串
@@ -479,10 +489,10 @@ def _parse_douyin_api(url):
         try:
             result_data = json.loads(result_data)
         except json.JSONDecodeError:
-            print(f"[视频解析] 52api data 不是合法 JSON: {result_data[:100]}")
+            vlog("info", f"52api data 不是合法 JSON: {result_data[:100]}")
             return None
     if not result_data or not isinstance(result_data, dict):
-        print(f"[视频解析] 52api data 为空")
+        vlog("info", f"52api data 为空")
         return None
 
     video_list = []
@@ -494,7 +504,7 @@ def _parse_douyin_api(url):
 
     if work_type == 'images' and isinstance(work_url_val, list):
         # === 实况/图文：work_url 是列表，每项含 {stream, url, width, height} ===
-        print(f"[视频解析] 多内容解析: work_url 列表长度={len(work_url_val)}")
+        vlog("info", f"多内容解析: work_url 列表长度={len(work_url_val)}")
         for item in work_url_val:
             if isinstance(item, dict):
                 stream_url = item.get('stream', '')
@@ -540,7 +550,7 @@ def _parse_douyin_api(url):
     )
 
     if not video_list and not image_list:
-        print(f"[视频解析] 52api 未解析到视频或图片内容")
+        vlog("info", f"52api 未解析到视频或图片内容")
         return None
 
     return {
@@ -558,7 +568,7 @@ def _parse_tiktok(url):
         result = asyncio.run(_parse_tiktok_async(url))
         return result
     except Exception as e:
-        print(f"[视频解析] TikTok 解析异常: {e}")
+        vlog("error", f"TikTok 解析异常: {e}")
         import traceback
         traceback.print_exc()
     return None
@@ -568,7 +578,7 @@ async def _parse_tiktok_async(url):
     try:
         from playwright.async_api import async_playwright
     except ImportError:
-        print("[视频解析] 需要 playwright")
+        vlog("info", f"需要 playwright")
         return None
 
     async with async_playwright() as p:
@@ -583,11 +593,11 @@ async def _parse_tiktok_async(url):
         )
         page = await ctx.new_page()
 
-        print(f"[视频解析] 打开 TikTok 页面...")
+        vlog("info", f"打开 TikTok 页面...")
         try:
             await page.goto(url, wait_until='domcontentloaded', timeout=30000)
         except Exception as e:
-            print(f"[视频解析] TikTok 加载超时: {e}")
+            vlog("warn", f"TikTok 加载超时: {e}")
         await page.wait_for_timeout(5000)
 
         # 从页面提取视频URL
@@ -634,14 +644,14 @@ async def _parse_tiktok_async(url):
         await browser.close()
 
         if video_url:
-            print(f"[视频解析] TikTok 提取成功")
+            vlog("info", f"TikTok 提取成功")
             return {
                 'video_list': [video_url],
                 'image_list': [],
                 'title': info.get('title', '') or '',
                 'author': info.get('author', '') or '',
             }
-        print(f"[视频解析] TikTok 未提取到视频URL")
+        vlog("info", f"TikTok 未提取到视频URL")
         return None
 
 
@@ -651,7 +661,7 @@ async def _parse_with_browser(url, platform):
     try:
         from playwright.async_api import async_playwright
     except ImportError:
-        print("[视频解析] 需要 playwright: pip3 install playwright && playwright install chromium")
+        vlog("info", f"需要 playwright: pip3 install playwright && playwright install chromium")
         return None
 
     global _browser_pool
@@ -737,7 +747,7 @@ def parse_video(url, platform):
                     _cache_set(url, result)
                     return result
             # fallback：52api.cn
-            print(f"[视频解析] B站公开API失败，尝试 52api.cn")
+            vlog("error", f"B站公开API失败，尝试 52api.cn")
             result = _parse_bilibili_52api(url)
             if result:
                 _cache_set(url, result)
@@ -758,7 +768,7 @@ def parse_video(url, platform):
                 _cache_set(url, result)
             return result
     except Exception as e:
-        print(f"[视频解析] 解析 {platform} 失败: {e}")
+        vlog("error", f"解析 {platform} 失败: {e}")
         import traceback
         traceback.print_exc()
     return None
@@ -785,7 +795,7 @@ def send_video(event, video_url, platform, title, author):
         txt += f"\n👤 {author[:20]}"
     msg.append({"type": "text", "data": {"text": txt + "\n"}})
     msg.append({"type": "video", "data": {"file": video_url}})
-    print(f"[视频解析] 发送视频到群 {group_id}")
+    vlog("info", f"发送视频到群 {group_id}")
     send_message(event, msg)
 
 
@@ -858,12 +868,12 @@ def send_merge_forward(event, video_list, image_urls, platform, title, author):
             if len(nodes) > 1:
                 send_forward_msg(event, nodes)
                 time.sleep(0.8)
-        print(f"[视频解析] 分批发送 {len(batches)} 组合并转发，共 {len(video_list)}视频{len(imgs)}图 到群 {group_id}")
+        vlog("info", f"分批发送 {len(batches)} 组合并转发，共 {len(video_list)}视频{len(imgs)}图 到群 {group_id}")
     else:
         nodes = _build_nodes(0, imgs, True)
         if len(nodes) > 1:
             send_forward_msg(event, nodes)
-            print(f"[视频解析] 发送合并转发 {len(nodes)} 条到群 {group_id}")
+            vlog("info", f"发送合并转发 {len(nodes)} 条到群 {group_id}")
 
     # 发送提示
     at_msg = []
@@ -892,7 +902,7 @@ def send_images(event, image_urls, platform, title, author):
     for u in imgs:
         time.sleep(0.3)
         send_message(event, [{"type": "image", "data": {"file": u}}])
-        print(f"[视频解析] 发送图片 {group_id}")
+        vlog("info", f"发送图片 {group_id}")
 
 
 def is_master(user_id):
@@ -949,7 +959,7 @@ try:
             _api.send_message(event, segs_to_cq(segs))
             return True
         except Exception as e:
-            print(f"[视频解析] 新核心发送失败: {e}")
+            vlog("error", f"新核心发送失败: {e}")
             return False
 
     _pb_configure(_pb_send, host_to_container)
@@ -959,12 +969,12 @@ try:
             _vcfg = os.path.join(DATA_DIR, "video_parser_config.json")
             _vpm.get_plugin(send_fn=_pb_send, container_path_fn=host_to_container,
                             cache_dir=get_cache_dir(), video_config_path=_vcfg)
-            print("[视频解析] 新解析核心已预初始化")
+            vlog("info", f"新解析核心已预初始化")
         except Exception as e:
-            print(f"[视频解析] 解析核心预初始化失败: {e}")
+            vlog("error", f"解析核心预初始化失败: {e}")
     threading.Thread(target=_preinit_core, daemon=True).start()
 except Exception as e:
-    print(f"[视频解析] 新解析核心接入失败: {e}")
+    vlog("error", f"新解析核心接入失败: {e}")
 
 
 def handle(event):
@@ -995,7 +1005,7 @@ def handle(event):
         if handle_parse(event):
             return True
     except Exception as _e:
-        print(f"[视频解析] 新解析核心异常，回退旧逻辑: {_e}")
+        vlog("error", f"新解析核心异常，回退旧逻辑: {_e}")
 
     # 从 message 段提取 URL（支持 QQ 分享卡片：CQ:share / CQ:json）
     extracted_text = collect_card_text(event, raw)
@@ -1003,11 +1013,11 @@ def handle(event):
     if not url or not platform:
         return False
 
-    print(f"[视频解析] {platform}: {url[:50]}...")
+    vlog("info", f"{platform}: {url[:50]}...")
     send_message(event, f"⏳ 正在解析{platform}视频，请稍候...")
     result = parse_video(url, platform)
     if not result:
-        print(f"[视频解析] {platform} 解析失败")
+        vlog("error", f"{platform} 解析失败")
         return True
 
     video_list = result.get("video_list", [])
@@ -1029,13 +1039,13 @@ def handle(event):
     has_images = bool(img_urls) and cfg("auto_send_images", True)
 
     if not has_video and not has_images:
-        print(f"[视频解析] 无内容可发")
+        vlog("info", f"无内容可发")
         return True
 
     # B站/TikTok 视频需要先下载到缓存（URL 有时效性/格式特殊）
     if platform in ('哔哩哔哩', 'TikTok') and has_video:
         plat_ref = 'https://www.bilibili.com/' if platform == '哔哩哔哩' else 'https://www.tiktok.com/'
-        print(f"[视频解析] {platform} 下载到缓存...")
+        vlog("info", f"{platform} 下载到缓存...")
         cached_list = []
         download_failed = False
         for vu in video_list:
@@ -1045,7 +1055,7 @@ def handle(event):
             else:
                 # 下载失败：不再回退发直链（B 站直链 NapCat 下载会 Forbidden）
                 download_failed = True
-                print(f"[视频解析] {platform} 视频下载失败，无法发送")
+                vlog("error", f"{platform} 视频下载失败，无法发送")
         if download_failed and not cached_list:
             send_message(event, f"⚠️ {platform}视频下载失败，请稍后再试")
             return True

@@ -18,6 +18,15 @@ from utils.command_registry import CommandRegistry
 # ========== 头像缓存（规避 NapCat 下载 qlogo 超时）==========
 _CACHE_DIR = None
 
+
+def plog(level, msg):
+    """分级日志"""
+    try:
+        from utils.log import plugin_log
+        plugin_log("结婚", level, msg)
+    except Exception:
+        plog("info", f"{msg}")
+
 def _get_cache_dir():
     global _CACHE_DIR
     if _CACHE_DIR:
@@ -54,7 +63,7 @@ def cache_avatar(avatar_url, qq):
             return container_path
         return avatar_url
     except Exception as e:
-        print(f"[结婚] 头像缓存失败: {e}")
+        plog("error", f"头像缓存失败: {e}")
         return avatar_url
 # ========== 插件元数据（SDK 规范）==========
 __plugin_name_cn__ = "结婚插件"
@@ -180,7 +189,7 @@ def load_marriage():
         _purge_old_days(data)
         return data
     except Exception as e:
-        print(f"加载婚姻数据失败: {e}")
+        plog("error", f"加载婚姻数据失败: {e}")
         return {}
 
 def save_marriage(data):
@@ -217,7 +226,7 @@ def get_group_members(group_id):
                 return data.get("data", [])
         return []
     except Exception as e:
-        print(f"获取群成员失败: {e}")
+        plog("error", f"获取群成员失败: {e}")
         return []
 
 def is_master(user_id):
