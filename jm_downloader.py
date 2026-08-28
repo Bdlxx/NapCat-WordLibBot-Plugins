@@ -71,6 +71,7 @@ DEFAULT_CONFIG = {
         "recall_pdf_seconds": 60,        # PDF 完成提醒撤回时间（秒）
         "recall_file_seconds": 300,      # PDF 文件消息撤回时间（秒）：文件发送/上传耗时较长，撤回窗口放宽到 5 分钟
         "recall_notice": False,          # 前置消息撤回提醒（默认关闭，仅PDF完成后提醒）
+        "debounce_seconds": 30,          # 同会话相同链接/本子ID 防抖间隔（秒），0=关闭
     },
     "messages": {
         "usage": "📖 用法：\njm <本子id> 下载整个本子，例：jm 123456\njm 123 456 多本下载\njm 123 p456 只下载某章节\njm详情 123456 查看本子信息（不下载）",
@@ -270,9 +271,73 @@ def _recall_send(event, message, recall_list=None, seconds=None):
         return None
 
 
+# ========== 防抖（同会话相同链接/本子ID 间隔内不重复响应）==========
+class _Debouncer:
+    """会话级防抖器：link 防抖 + 资源（本子ID）防抖"""
+
+    def __init__(self):
+        self._cache: dict[str, dict[str, float]] = {}  # {session: {key: ts}}
+        self._lock = threading.Lock()
+
+    def _interval(self) -> float:
+        try:
+            return float(cfg("debounce_seconds", 30))
+        except (TypeError, ValueError):
+            return 30
+
+    def _hit(self, session: str, key: str) -> bool:
+        interval = self._interval()
+        if interval <= 0:
+            return False
+        now = time.time()
+        with self._lock:
+            bucket = self._cache.setdefault(session, {})
+            # 清理过期
+            expire = now - interval
+            for k, ts in list(bucket.items()):
+                if ts < expire:
+                    bucket.pop(k, None)
+            # 命中判断
+            if key in bucket:
+                return True
+            bucket[key] = now
+            return False
+
+    def hit_link(self, session: str, link: str) -> bool:
+        """基于完整下载指令的防抖（jm <ids> 相同请求）"""
+        return self._hit(session, f"link:{link}")
+
+    def hit_resource(self, session: str, resource_id: str) -> bool:
+        """基于本子 ID 的防抖（同一本子不重复下载）"""
+        return self._hit(session, f"res:{resource_id}")
+
+
+_debouncer = _Debouncer()
+
+
+def _session_key(event) -> str:
+    """会话标识：群=群号，私聊=用户ID"""
+    return str(event.get("group_id") or event.get("user_id") or 0)
+
+
 # ========== 任务调度 ==========
 def _start_task(event, ids, detail_only=False):
     group_id = str(event.get("group_id") or event.get("user_id") or 0)
+    session = _session_key(event)
+
+    # link 防抖：相同 `jm <ids>` 指令在间隔内不重复响应
+    link = f"{'详情' if detail_only else '下载'} {','.join(sorted(ids))}"
+    if _debouncer.hit_link(session, link):
+        print(f"[JM下载] 链接防抖: {link}")
+        return
+
+    # 资源防抖：任一本子 ID 在间隔内已请求过，跳过本次（避免重复下载）
+    if not detail_only:
+        for i in ids:
+            if _debouncer.hit_resource(session, i):
+                print(f"[JM下载] 本子 {i} 防抖中，跳过重复下载")
+                return
+
     with _task_lock:
         if group_id in _active_tasks:
             send_message(event, _l("busy"))
