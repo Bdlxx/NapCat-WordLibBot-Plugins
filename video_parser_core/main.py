@@ -29,8 +29,9 @@ from .utils import extract_json_url
 class ParserPlugin:
     """解析插件（复刻 astrbot_plugin_parser 核心）"""
 
-    def __init__(self, send_fn=None, container_path_fn=None, cache_dir=None):
+    def __init__(self, send_fn=None, container_path_fn=None, cache_dir=None, video_config_path=None):
         self.cfg = PluginConfig(config_dir=cache_dir)
+        self._video_config_path = video_config_path
         self.renderer = Renderer(self.cfg)
         self.debouncer = Debouncer(self.cfg)
         self.sender = None  # 延迟创建（需事件循环）
@@ -46,6 +47,12 @@ class ParserPlugin:
         """在事件循环内初始化异步组件（Downloader/MessageSender）"""
         if self.downloader is not None:
             return
+        # 从 video_parser_config.json 加载用户配置（web 面板可调参数）
+        if self._video_config_path and os.path.exists(self._video_config_path):
+            try:
+                self.cfg.load_from_video_config(self._video_config_path)
+            except Exception as e:
+                print(f"[解析器] 加载视频解析配置失败: {e}")
         self.downloader = Downloader(self.cfg)
         self.sender = MessageSender(self.cfg, self.renderer)
         self._register_parser()
@@ -175,13 +182,14 @@ def _start_loop():
     return t
 
 
-def get_plugin(send_fn=None, container_path_fn=None, cache_dir=None) -> ParserPlugin:
+def get_plugin(send_fn=None, container_path_fn=None, cache_dir=None, video_config_path=None) -> ParserPlugin:
     global _plugin_instance, _loop_thread
     if _plugin_instance is None:
         if _loop_thread is None:
             _loop_thread = _start_loop()
         # 在持久 loop 中初始化异步组件
-        _plugin_instance = ParserPlugin(send_fn=send_fn, container_path_fn=container_path_fn, cache_dir=cache_dir)
+        _plugin_instance = ParserPlugin(send_fn=send_fn, container_path_fn=container_path_fn,
+                                        cache_dir=cache_dir, video_config_path=video_config_path)
         fut = asyncio.run_coroutine_threadsafe(_plugin_instance._init_async_async(), _loop)
         fut.result(timeout=30)
     else:

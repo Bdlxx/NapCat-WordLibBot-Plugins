@@ -48,6 +48,18 @@ DEFAULT_CONFIG = {
     "max_images": 50,
     "@_reply": True,
     "show_source": True,
+    # 新解析核心（astrbot_plugin_parser 复刻版）参数
+    "browser_timeout": 60,            # 下载超时（秒）
+    "download_retry_times": 3,        # 下载重试次数
+    "download_max_size": 300,         # 下载大小上限（MB）
+    "download_max_duration": 3600,    # 视频时长上限（秒）
+    "forward_threshold": 4,           # 消息段达到该数量强制合并转发
+    "debounce_seconds": 30,           # 解析防抖间隔（秒）
+    "show_download_fail_tip": True,   # 下载失败时提示
+    "audio_to_file": False,           # 音频以文件形式发送（默认语音）
+    "proxy": "",                      # 代理地址（如 http://127.0.0.1:7890）
+    "bili_video_quality": "P_720P",   # B站画质：P_360P/P_480P/P_720P/P_1080P
+    "bili_video_codec": "AVC",        # B站编码：AVC/HEVC/AV1
 }
 
 _CONFIG = {}
@@ -944,7 +956,9 @@ try:
     # 预初始化解析核心（后台线程，避免首次消息卡顿）
     def _preinit_core():
         try:
-            _vpm.get_plugin(send_fn=_pb_send, container_path_fn=host_to_container, cache_dir=get_cache_dir())
+            _vcfg = os.path.join(DATA_DIR, "video_parser_config.json")
+            _vpm.get_plugin(send_fn=_pb_send, container_path_fn=host_to_container,
+                            cache_dir=get_cache_dir(), video_config_path=_vcfg)
             print("[视频解析] 新解析核心已预初始化")
         except Exception as e:
             print(f"[视频解析] 解析核心预初始化失败: {e}")

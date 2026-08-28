@@ -136,3 +136,66 @@ class PluginConfig:
         for k, v in data.items():
             if hasattr(self, k) and not k.startswith("_"):
                 setattr(self, k, v)
+
+    def load_from_video_config(self, path: str):
+        """从 video_parser_config.json 读取配置，映射到核心参数"""
+        if not os.path.exists(path):
+            return
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except Exception:
+            return
+        # 数值映射
+        int_map = {
+            "browser_timeout": ("download_timeout", 60),
+            "download_timeout": ("download_timeout", 60),
+            "debounce_seconds": ("debounce_interval", 30),
+            "download_retry_times": ("download_retry_times", 3),
+            "source_max_size": ("source_max_size", 300),
+            "download_max_size": ("source_max_size", 300),
+            "download_max_duration": ("max_duration", 3600),
+            "forward_threshold": ("forward_threshold", 4),
+            "common_timeout": ("common_timeout", 60),
+        }
+        for src, (dst, default) in int_map.items():
+            if src in data:
+                try:
+                    setattr(self, dst, int(data[src]))
+                except (TypeError, ValueError):
+                    setattr(self, dst, default)
+        # 布尔映射
+        bool_map = {
+            "show_download_fail_tip": "show_download_fail_tip",
+            "audio_to_file": "audio_to_file",
+            "single_heavy_render_card": "single_heavy_render_card",
+            "require_at_in_group": "require_at_in_group",
+        }
+        for src, dst in bool_map.items():
+            if src in data:
+                v = data[src]
+                if isinstance(v, str):
+                    v = v.lower() in ("true", "1", "yes")
+                setattr(self, dst, bool(v))
+        # 字符串映射
+        str_map = {
+            "proxy": "proxy",
+        }
+        for src, dst in str_map.items():
+            if src in data and data[src]:
+                setattr(self, dst, str(data[src]))
+        # 抖音 Cookie → 抖音解析器 cookies
+        if data.get("douyin_cookie"):
+            try:
+                self.parser.douyin.cookies = str(data["douyin_cookie"])
+                self.parser.douyin.name = "douyin"
+            except Exception:
+                pass
+        # B站画质/编码 → bilibili 解析器
+        try:
+            if data.get("bili_video_quality"):
+                self.parser.bilibili.video_quality = str(data["bili_video_quality"])
+            if data.get("bili_video_codec"):
+                self.parser.bilibili.video_codec_list = [str(data["bili_video_codec"])]
+        except Exception:
+            pass
