@@ -229,14 +229,19 @@ class MessageSender:
             return segs
         nodes = Nodes([])
         self_id = event.get_self_id()
-        # 节点名：优先用视频简介（平台 @作者 | 标题），避免显示「解析器」
+        # 节点名三行结构：平台 / @作者 / 简介
         node_name = "解析器"
         if result is not None:
             try:
-                if result.header:
-                    node_name = result.header[:20]
-                elif result.title:
-                    node_name = result.title[:20]
+                lines = []
+                if result.platform and result.platform.display_name:
+                    lines.append(result.platform.display_name)
+                if result.author and result.author.name:
+                    lines.append(f"@{result.author.name}")
+                if result.title:
+                    lines.append(result.title[:30])
+                if lines:
+                    node_name = "\n".join(lines)
             except Exception:
                 pass
         for seg in segs:
