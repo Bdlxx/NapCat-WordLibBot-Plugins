@@ -239,8 +239,8 @@ class DouyinParser(BaseParser):
                 self.create_image_contents(image_urls, headers=self.ios_headers)
             )
 
-        # 添加视频内容
-        elif video_data.video:
+        # 添加视频内容（图文/实况图也可能带视频，两者同时发送）
+        if video_data.video:
             cover_url = video_data.cover_url
             duration = video_data.video.duration if video_data.video else 0
             logger.debug(f"[抖音] 检测到视频内容，时长: {duration}秒")

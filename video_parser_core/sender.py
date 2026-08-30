@@ -140,6 +140,12 @@ class MessageSender:
             else:
                 light.append(cont)
 
+        # 视频+图文混合（如抖音实况图）：视频直发为主体，图片单独合并转发，
+        # 避免把所有内容塞进一条 forward 导致图片以合并形式发送、视频丢失主体地位
+        has_video = any(isinstance(c, VideoContent) for c in heavy)
+        has_images = bool(light)
+        split_media = has_video and has_images
+
         is_single_heavy = len(heavy) == 1 and not light
         render_card = is_single_heavy and self.cfg.single_heavy_render_card
         if render_card_override is not None:
@@ -156,6 +162,8 @@ class MessageSender:
             "render_card": render_card,
             "preview_card": render_card and not force_merge,
             "force_merge": force_merge,
+            # 视频+图片混合：视频直发，图片拆分为独立合并转发（不占用主消息段数）
+            "split_media": split_media,
         }
 
     async def _send_preview_card(self, event, result, plan):
@@ -164,52 +172,55 @@ class MessageSender:
         if image_path := await self.renderer.render_card(result):
             await event.send(event.chain_result([self._image_from_path(image_path)]))
 
-    async def _build_segments(self, result, plan) -> list[BaseMessageComponent]:
+    async def _build_segments(self, result, plan, only=None) -> list[BaseMessageComponent]:
+        """构建消息段；only='light'/'heavy' 时只构建对应分组（用于视频+图片分流）"""
         segs = []
-        if plan["render_card"] and plan["force_merge"]:
+        if plan["render_card"] and plan["force_merge"] and only is None:
             if image_path := await self.renderer.render_card(result):
                 segs.append(self._image_from_path(image_path))
 
-        for cont in plan["light"]:
-            if isinstance(cont, TextContent):
-                if cont.text:
-                    segs.append(Plain(cont.text))
-                continue
-            try:
-                path: Path = await cont.get_path()
-            except (DownloadLimitException, ZeroSizeException):
-                continue
-            except DownloadException:
-                if self.cfg.show_download_fail_tip:
-                    segs.append(Plain("此项媒体下载失败"))
-                continue
-            if isinstance(cont, ImageContent):
-                segs.append(self._image_from_path(path))
-            elif isinstance(cont, GraphicsContent):
-                segs.append(self._image_from_path(path))
-                if cont.text:
-                    segs.append(Plain(cont.text))
-                if cont.alt:
-                    segs.append(Plain(cont.alt))
+        if only in (None, 'light'):
+            for cont in plan["light"]:
+                if isinstance(cont, TextContent):
+                    if cont.text:
+                        segs.append(Plain(cont.text))
+                    continue
+                try:
+                    path: Path = await cont.get_path()
+                except (DownloadLimitException, ZeroSizeException):
+                    continue
+                except DownloadException:
+                    if self.cfg.show_download_fail_tip:
+                        segs.append(Plain("此项媒体下载失败"))
+                    continue
+                if isinstance(cont, ImageContent):
+                    segs.append(self._image_from_path(path))
+                elif isinstance(cont, GraphicsContent):
+                    segs.append(self._image_from_path(path))
+                    if cont.text:
+                        segs.append(Plain(cont.text))
+                    if cont.alt:
+                        segs.append(Plain(cont.alt))
 
-        for cont in plan["heavy"]:
-            try:
-                path: Path = await cont.get_path()
-            except (SizeLimitException, DurationLimitException) as exc:
-                if self.cfg.show_download_fail_tip:
-                    message = "此项媒体超过时长限制" if isinstance(exc, DurationLimitException) else "此项媒体超过大小限制"
-                    segs.append(Plain(message))
-                continue
-            except DownloadException:
-                if self.cfg.show_download_fail_tip:
-                    segs.append(Plain("此项媒体下载失败"))
-                continue
-            if isinstance(cont, (VideoContent, DynamicContent)):
-                segs.append(self._video_from_path(path))
-            elif isinstance(cont, AudioContent):
-                segs.append(File(name=path.name, file=self._to_file_uri(path)) if self.cfg.audio_to_file else self._record_from_path(path))
-            elif isinstance(cont, FileContent):
-                segs.append(File(name=path.name, file=self._to_file_uri(path)))
+        if only in (None, 'heavy'):
+            for cont in plan["heavy"]:
+                try:
+                    path: Path = await cont.get_path()
+                except (SizeLimitException, DurationLimitException) as exc:
+                    if self.cfg.show_download_fail_tip:
+                        message = "此项媒体超过时长限制" if isinstance(exc, DurationLimitException) else "此项媒体超过大小限制"
+                        segs.append(Plain(message))
+                    continue
+                except DownloadException:
+                    if self.cfg.show_download_fail_tip:
+                        segs.append(Plain("此项媒体下载失败"))
+                    continue
+                if isinstance(cont, (VideoContent, DynamicContent)):
+                    segs.append(self._video_from_path(path))
+                elif isinstance(cont, AudioContent):
+                    segs.append(File(name=path.name, file=self._to_file_uri(path)) if self.cfg.audio_to_file else self._record_from_path(path))
+                elif isinstance(cont, FileContent):
+                    segs.append(File(name=path.name, file=self._to_file_uri(path)))
 
         return segs
 
@@ -246,6 +257,29 @@ class MessageSender:
             render_card_override=group.render_card,
         )
         await self._send_preview_card(event, result, plan)
+
+        # 视频+图片混合（实况图/图文带视频）：视频直发 + 图片独立合并转发
+        if plan.get("split_media"):
+            sent_ok = False
+            # 1. 视频直发（主体）
+            heavy_segs = await self._build_segments(result, plan, only='heavy')
+            if heavy_segs:
+                try:
+                    await event.send(event.chain_result(heavy_segs))
+                    sent_ok = True
+                except Exception as e:
+                    logger.error(f"发送视频失败： error={e}")
+            # 2. 图片合并转发（避免刷屏）
+            light_segs = await self._build_segments(result, plan, only='light')
+            if light_segs:
+                light_segs = self._merge_segments_if_needed(event, light_segs, True)
+                try:
+                    await event.send(event.chain_result(light_segs))
+                    sent_ok = True
+                except Exception as e:
+                    logger.error(f"发送图片失败： error={e}")
+            return sent_ok
+
         segs = await self._build_segments(result, plan)
         segs = self._merge_segments_if_needed(event, segs, plan["force_merge"])
 
