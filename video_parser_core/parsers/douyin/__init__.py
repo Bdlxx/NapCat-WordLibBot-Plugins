@@ -232,11 +232,12 @@ class DouyinParser(BaseParser):
         # 使用新的简洁构建方式
         contents = []
 
-        # 添加图片内容
+        # 添加图片内容（图片 CDN 需 Referer 防盗链，否则 403）
         if image_urls := video_data.image_urls:
             logger.debug(f"[抖音] 检测到图文内容，图片数量: {len(image_urls)}")
+            img_headers = self._build_media_headers("https://www.douyin.com/")
             contents.extend(
-                self.create_image_contents(image_urls, headers=self.ios_headers)
+                self.create_image_contents(image_urls, headers=img_headers)
             )
 
         # 添加视频内容（图文/实况图也可能带视频，两者同时发送）
@@ -365,11 +366,12 @@ class DouyinParser(BaseParser):
         )
         contents = []
 
-        # 添加图片内容
+        # 添加图片内容（图片 CDN 需 Referer 防盗链，否则 403）
         if image_urls := slides_data.image_urls:
             logger.debug(f"[抖音] 检测到幻灯片图片，数量: {len(image_urls)}")
+            img_headers = self._build_media_headers("https://www.douyin.com/")
             contents.extend(
-                self.create_image_contents(image_urls, headers=self.android_headers)
+                self.create_image_contents(image_urls, headers=img_headers)
             )
 
         # 添加动态内容

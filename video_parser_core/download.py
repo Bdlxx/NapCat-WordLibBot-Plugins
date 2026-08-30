@@ -97,6 +97,8 @@ class Downloader:
         if file_path.exists():
             return file_path
         headers = headers or self.default_headers
+        if proxy is ...:
+            proxy = None  # aiohttp 不接受 Ellipsis，转 None
         retries = self.cfg.download_retry_times
         for attempt in range(retries + 1):
             try:
@@ -142,6 +144,33 @@ class Downloader:
                 await safe_unlink(file_path)
                 raise
             except (ClientError, TimeoutError) as exc:
+                # aiohttp 可能因 TLS 指纹被 CDN 拒绝（403，如抖音 douyinpic.com）。
+                # 尝试 requests 兜底（requests 的 TLS 指纹更接近浏览器）
+                try:
+                    logger.warning(f"aiohttp 下载失败({exc})，尝试 requests 兜底: {file_name}")
+                    import requests as _req
+                    r = _req.get(url, headers=headers, timeout=60, stream=True)
+                    if r.status_code == 200:
+                        max_bytes = self.max_size * 1024 * 1024
+                        downloaded = 0
+                        with open(file_path, "wb") as f:
+                            for chunk in r.iter_content(chunk_size=8192):
+                                if chunk:
+                                    f.write(chunk)
+                                    downloaded += len(chunk)
+                                    if downloaded > max_bytes:
+                                        raise SizeLimitException
+                        if downloaded == 0:
+                            raise ZeroSizeException
+                        r.close()
+                        return file_path
+                    r.close()
+                    raise ClientError(f"HTTP {r.status_code}")
+                except (ZeroSizeException, SizeLimitException):
+                    await safe_unlink(file_path)
+                    raise
+                except Exception:
+                    pass
                 await safe_unlink(file_path)
                 if attempt < retries:
                     await sleep(1 + attempt)

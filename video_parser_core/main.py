@@ -104,12 +104,12 @@ class ParserPlugin:
 
         aev = AstrMessageEvent(event, send_fn=self._send_fn)
 
-        # 链接防抖
+        # 链接防抖：命中视为已处理（防止 fallback 旧逻辑导致双重解析）
         link = searched.group(0)
         umo = aev.unified_msg_origin()
         if self.debouncer.hit_link(umo, link):
             print(f"[解析器] 链接防抖: {link}")
-            return False
+            return True
 
         # 解析
         try:
