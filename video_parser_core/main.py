@@ -19,6 +19,7 @@ from astrbot.core.message.components import Json, Plain
 
 from .config import PluginConfig
 from .debounce import Debouncer
+from .exception import ParseFallbackError
 from .download import Downloader
 from .parsers import BaseParser
 from .render import Renderer
@@ -115,8 +116,8 @@ class ParserPlugin:
         try:
             parse_res = await self.parser_map[keyword].parse(keyword, searched)
         except Exception as e:
-            print(f"[解析器] 解析失败 [{keyword}]: {e}")
-            return True
+            # 抛给上层：新核心解析失败 → 转旧逻辑（并提示切换）
+            raise ParseFallbackError(f"新核心解析失败 [{keyword}]: {e}")
 
         # 资源防抖
         try:
@@ -199,14 +200,18 @@ def get_plugin(send_fn=None, container_path_fn=None, cache_dir=None, video_confi
     return _plugin_instance
 
 
-def handle_event_sync(event: dict, send_fn=None, container_path_fn=None, cache_dir=None) -> bool:
-    """同步包装：供 video_parser.py 的 handle() 调用"""
+def handle_event_sync(event: dict, send_fn=None, container_path_fn=None, cache_dir=None):
+    """同步包装：供 video_parser.py 的 handle() 调用。
+    返回：True=已消费；False=未匹配；'fallback'=解析失败需转旧逻辑"""
     # 绑定当前事件：send_fn(segs) 使用传入的 event
     bound_send = (lambda segs: send_fn(event, segs)) if send_fn else None
     plugin = get_plugin(send_fn=bound_send, container_path_fn=container_path_fn, cache_dir=cache_dir)
     fut = asyncio.run_coroutine_threadsafe(plugin.handle_event(event), _loop)
     try:
         return fut.result(timeout=120)
+    except ParseFallbackError as e:
+        print(f"[解析器] {e}")
+        return "fallback"
     except Exception as e:
         print(f"[解析器] 处理异常: {e}")
-        return False
+        return "fallback"

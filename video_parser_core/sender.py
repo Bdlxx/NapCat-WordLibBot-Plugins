@@ -268,26 +268,20 @@ class MessageSender:
         )
         await self._send_preview_card(event, result, plan)
 
-        # 视频+图片混合（实况图/图文带视频）：视频直发 + 图片独立合并转发
+        # 视频+图片混合（实况图/图文带视频）：单条合并转发，视频在前、图片在后
+        # （与旧逻辑一致：聊天记录卡片上方视频、下方图片）
         if plan.get("split_media"):
             sent_ok = False
-            # 1. 视频直发（主体）
             heavy_segs = await self._build_segments(result, plan, only='heavy')
-            if heavy_segs:
-                try:
-                    await event.send(event.chain_result(heavy_segs))
-                    sent_ok = True
-                except Exception as e:
-                    logger.error(f"发送视频失败： error={e}")
-            # 2. 图片合并转发（避免刷屏）
             light_segs = await self._build_segments(result, plan, only='light')
-            if light_segs:
-                light_segs = self._merge_segments_if_needed(event, light_segs, True, result)
+            all_segs = heavy_segs + light_segs
+            if all_segs:
+                all_segs = self._merge_segments_if_needed(event, all_segs, True, result)
                 try:
-                    await event.send(event.chain_result(light_segs))
+                    await event.send(event.chain_result(all_segs))
                     sent_ok = True
                 except Exception as e:
-                    logger.error(f"发送图片失败： error={e}")
+                    logger.error(f"发送混合内容失败： error={e}")
             return sent_ok
 
         segs = await self._build_segments(result, plan)

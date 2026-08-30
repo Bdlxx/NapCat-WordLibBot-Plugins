@@ -51,3 +51,11 @@ class RedirectException(DownloadException):
 
     def __init__(self):
         super().__init__("媒体链接重定向时出现异常")
+
+
+class ParseFallbackError(ParseException):
+    """新核心解析失败，需回退旧逻辑（供上层捕获切换）"""
+
+    def __init__(self, message: str):
+        super().__init__(message)
+        self.message = message

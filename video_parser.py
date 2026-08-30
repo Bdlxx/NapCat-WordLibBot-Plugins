@@ -1000,10 +1000,16 @@ def handle(event):
         return False
 
     # 尝试新解析核心（astrbot_plugin_parser 复刻版：16 平台，含 B站卡片/动态/专栏等）
+    # 返回 2=成功 1=未匹配 0=解析失败（提示后转旧逻辑）
     try:
         from plugins.parser_bridge import handle_parse
-        if handle_parse(event):
+        result = handle_parse(event)
+        if result == 2:
             return True
+        if result == 0:
+            # 新核心解析失败：提示切换解析器，再转旧逻辑
+            vlog("warn", "新核心解析失败，切换回旧解析器")
+            send_message(event, "⚠️ 新解析器解析失败，切换回旧解析器重试...")
     except Exception as _e:
         vlog("error", f"新解析核心异常，回退旧逻辑: {_e}")
 

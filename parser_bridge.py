@@ -64,15 +64,23 @@ def extract_text_from_event(event) -> str:
     return text
 
 
-def handle_parse(event: dict) -> bool:
-    """同步入口：解析并发送，返回是否消费事件"""
+def handle_parse(event: dict):
+    """同步入口：解析并发送。
+    返回：
+      2 = 新核心成功处理（已发送）
+      1 = 新核心未匹配链接（继续走旧逻辑，不提示）
+      0 = 新核心解析失败（需提示后转旧逻辑）
+    """
     text = extract_text_from_event(event)
     if not text:
-        return False
+        return 1
     try:
-        return vpm.handle_event_sync(event, send_fn=_send_fn, container_path_fn=_container_fn)
+        result = vpm.handle_event_sync(event, send_fn=_send_fn, container_path_fn=_container_fn)
+        if result == "fallback":
+            return 0  # 新核心解析失败 → 转旧逻辑
+        return 2 if result else 1
     except Exception as e:
         import traceback
-        print(f"[解析器] 处理异常: {e}")
+        print(f"[解析器] 新核心解析失败: {e}")
         traceback.print_exc()
-        return False
+        return 0
