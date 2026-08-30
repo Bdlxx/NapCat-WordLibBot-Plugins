@@ -224,13 +224,23 @@ class MessageSender:
 
         return segs
 
-    def _merge_segments_if_needed(self, event, segs, force_merge):
+    def _merge_segments_if_needed(self, event, segs, force_merge, result=None):
         if not force_merge or not segs:
             return segs
         nodes = Nodes([])
         self_id = event.get_self_id()
+        # 节点名：优先用视频简介（平台 @作者 | 标题），避免显示「解析器」
+        node_name = "解析器"
+        if result is not None:
+            try:
+                if result.header:
+                    node_name = result.header[:20]
+                elif result.title:
+                    node_name = result.title[:20]
+            except Exception:
+                pass
         for seg in segs:
-            nodes.nodes.append(Node(uin=self_id, name="解析器", content=[seg]))
+            nodes.nodes.append(Node(uin=self_id, name=node_name, content=[seg]))
         return [nodes]
 
     @staticmethod
@@ -272,7 +282,7 @@ class MessageSender:
             # 2. 图片合并转发（避免刷屏）
             light_segs = await self._build_segments(result, plan, only='light')
             if light_segs:
-                light_segs = self._merge_segments_if_needed(event, light_segs, True)
+                light_segs = self._merge_segments_if_needed(event, light_segs, True, result)
                 try:
                     await event.send(event.chain_result(light_segs))
                     sent_ok = True
@@ -281,7 +291,7 @@ class MessageSender:
             return sent_ok
 
         segs = await self._build_segments(result, plan)
-        segs = self._merge_segments_if_needed(event, segs, plan["force_merge"])
+        segs = self._merge_segments_if_needed(event, segs, plan["force_merge"], result)
 
         if not segs:
             return False
