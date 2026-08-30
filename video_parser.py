@@ -1050,31 +1050,7 @@ def handle(event):
     if not raw:
         return False
 
-    # 抖音：优先旧逻辑（52api 对实况图/图文/合集支持完整：视频+图片合并转发，
-    # 新核心 slides 的 image.video 常为空或带水印，实况图支持不完整）
-    extracted_text = collect_card_text(event, raw)
-    url, platform = extract_url(extracted_text)
-    if not url or not platform:
-        return False
-
-    if platform == '抖音':
-        vlog("info", f"{platform}: {url[:50]}...")
-        send_message(event, f"⏳ 正在解析{platform}视频，请稍候...")
-        result = parse_video(url, platform)
-        if not result:
-            # 旧逻辑失败 → 尝试新核心
-            vlog("warn", "旧解析器失败，尝试新解析核心")
-            try:
-                from plugins.parser_bridge import handle_parse
-                if handle_parse(event) == 2:
-                    return True
-            except Exception as _e2:
-                vlog("error", f"新解析核心异常: {_e2}")
-            vlog("error", f"{platform} 解析失败")
-            return True
-        return _send_parsed(event, result, platform)
-
-    # 尝试新解析核心（astrbot_plugin_parser 复刻版：16 平台，含 B站卡片/动态/专栏等）
+    # 统一流程：新解析核心优先（快），失败提示切换后转旧逻辑
     # 返回 2=成功 1=未匹配 0=解析失败（提示后转旧逻辑）
     try:
         from plugins.parser_bridge import handle_parse
