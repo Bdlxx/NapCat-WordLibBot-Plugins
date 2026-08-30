@@ -977,6 +977,11 @@ except Exception as e:
     vlog("error", f"新解析核心接入失败: {e}")
 
 
+def _send_parsed(event, result, platform):
+    """发送旧逻辑解析结果：单视频直发，多视频/图文合集合并转发"""
+    return _send_parsed(event, result, platform)
+
+
 def handle(event):
     if event.get("post_type") != "message":
         return False
@@ -998,6 +1003,30 @@ def handle(event):
         return False
     if not raw:
         return False
+
+    # 抖音：优先旧逻辑（52api 对实况图/图文/合集支持完整：视频+图片合并转发，
+    # 新核心 slides 的 image.video 常为空或带水印，实况图支持不完整）
+    extracted_text = collect_card_text(event, raw)
+    url, platform = extract_url(extracted_text)
+    if not url or not platform:
+        return False
+
+    if platform == '抖音':
+        vlog("info", f"{platform}: {url[:50]}...")
+        send_message(event, f"⏳ 正在解析{platform}视频，请稍候...")
+        result = parse_video(url, platform)
+        if not result:
+            # 旧逻辑失败 → 尝试新核心
+            vlog("warn", "旧解析器失败，尝试新解析核心")
+            try:
+                from plugins.parser_bridge import handle_parse
+                if handle_parse(event) == 2:
+                    return True
+            except Exception as _e2:
+                vlog("error", f"新解析核心异常: {_e2}")
+            vlog("error", f"{platform} 解析失败")
+            return True
+        return _send_parsed(event, result, platform)
 
     # 尝试新解析核心（astrbot_plugin_parser 复刻版：16 平台，含 B站卡片/动态/专栏等）
     # 返回 2=成功 1=未匹配 0=解析失败（提示后转旧逻辑）
@@ -1026,50 +1055,4 @@ def handle(event):
         vlog("error", f"{platform} 解析失败")
         return True
 
-    video_list = result.get("video_list", [])
-    if not video_list:
-        single = result.get("video_url", "")
-        if single:
-            video_list = [single]
-    image_list = result.get("image_list", [])
-    title = result.get("title", "")
-    author = result.get("author", "")
-
-    img_urls = []
-    for img in image_list:
-        u = img.get("url") if isinstance(img, dict) else img
-        if u:
-            img_urls.append(u)
-
-    has_video = bool(video_list) and cfg("auto_send_video", True)
-    has_images = bool(img_urls) and cfg("auto_send_images", True)
-
-    if not has_video and not has_images:
-        vlog("info", f"无内容可发")
-        return True
-
-    # B站/TikTok 视频需要先下载到缓存（URL 有时效性/格式特殊）
-    if platform in ('哔哩哔哩', 'TikTok') and has_video:
-        plat_ref = 'https://www.bilibili.com/' if platform == '哔哩哔哩' else 'https://www.tiktok.com/'
-        vlog("info", f"{platform} 下载到缓存...")
-        cached_list = []
-        download_failed = False
-        for vu in video_list:
-            local = download_video_to_cache(vu, plat_ref)
-            if local and not local.startswith('http'):
-                cached_list.append(local)
-            else:
-                # 下载失败：不再回退发直链（B 站直链 NapCat 下载会 Forbidden）
-                download_failed = True
-                vlog("error", f"{platform} 视频下载失败，无法发送")
-        if download_failed and not cached_list:
-            send_message(event, f"⚠️ {platform}视频下载失败，请稍后再试")
-            return True
-        video_list = cached_list
-
-    # 单视频（无图片）直发，多视频/图文合集合并转发
-    if len(video_list) <= 1 and not has_images:
-        send_video(event, video_list[0], platform, title, author)
-    elif has_video or has_images:
-        send_merge_forward(event, video_list, img_urls, platform, title, author)
-    return True
+    return _send_parsed(event, result, platform)
