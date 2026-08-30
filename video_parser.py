@@ -979,7 +979,53 @@ except Exception as e:
 
 def _send_parsed(event, result, platform):
     """发送旧逻辑解析结果：单视频直发，多视频/图文合集合并转发"""
-    return _send_parsed(event, result, platform)
+    video_list = result.get("video_list", [])
+    if not video_list:
+        single = result.get("video_url", "")
+        if single:
+            video_list = [single]
+    image_list = result.get("image_list", [])
+    title = result.get("title", "")
+    author = result.get("author", "")
+
+    img_urls = []
+    for img in image_list:
+        u = img.get("url") if isinstance(img, dict) else img
+        if u:
+            img_urls.append(u)
+
+    has_video = bool(video_list) and cfg("auto_send_video", True)
+    has_images = bool(img_urls) and cfg("auto_send_images", True)
+
+    if not has_video and not has_images:
+        vlog("info", f"无内容可发")
+        return True
+
+    # B站/TikTok 视频需要先下载到缓存（URL 有时效性/格式特殊）
+    if platform in ('哔哩哔哩', 'TikTok') and has_video:
+        plat_ref = 'https://www.bilibili.com/' if platform == '哔哩哔哩' else 'https://www.tiktok.com/'
+        vlog("info", f"{platform} 下载到缓存...")
+        cached_list = []
+        download_failed = False
+        for vu in video_list:
+            local = download_video_to_cache(vu, plat_ref)
+            if local and not local.startswith('http'):
+                cached_list.append(local)
+            else:
+                # 下载失败：不再回退发直链（B 站直链 NapCat 下载会 Forbidden）
+                download_failed = True
+                vlog("error", f"{platform} 视频下载失败，无法发送")
+        if download_failed and not cached_list:
+            send_message(event, f"⚠️ {platform}视频下载失败，请稍后再试")
+            return True
+        video_list = cached_list
+
+    # 单视频（无图片）直发，多视频/图文合集合并转发
+    if len(video_list) <= 1 and not has_images:
+        send_video(event, video_list[0], platform, title, author)
+    elif has_video or has_images:
+        send_merge_forward(event, video_list, img_urls, platform, title, author)
+    return True
 
 
 def handle(event):
