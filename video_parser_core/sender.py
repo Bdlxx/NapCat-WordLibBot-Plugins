@@ -229,17 +229,24 @@ class MessageSender:
             return segs
         nodes = Nodes([])
         self_id = event.get_self_id()
-        # 节点名固定三行：平台 / @作者 / 简介
-        # 末尾追加一个空行：QQ 合并转发卡片对 name 换行渲染会多显示一行，
-        # 强制第 4 行为空避免内容重复
+        # 节点名两行：平台@作者\n简介
+        # QQ 合并转发卡片每条只显示 name 前两行（NapCat 实测），
+        # 用两行让平台/作者/简介都可见
         node_name = "解析器"
         if result is not None:
             try:
-                lines = []
-                lines.append(result.platform.display_name if (result.platform and result.platform.display_name) else "")
-                lines.append(f"@{result.author.name}" if (result.author and result.author.name) else "")
-                lines.append((result.title or "")[:30])
-                node_name = "\n".join(lines) + "\n"
+                line1 = ""
+                if result.platform and result.platform.display_name:
+                    line1 += result.platform.display_name
+                if result.author and result.author.name:
+                    line1 += f"@{result.author.name}"
+                title = (result.title or "")[:30]
+                if line1 and title:
+                    node_name = f"{line1}\n{title}"
+                elif line1:
+                    node_name = line1
+                elif title:
+                    node_name = title
             except Exception:
                 pass
         for seg in segs:
