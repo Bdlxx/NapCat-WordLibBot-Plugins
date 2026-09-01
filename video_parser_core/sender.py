@@ -225,24 +225,36 @@ class MessageSender:
         return segs
 
     def _merge_segments_if_needed(self, event, segs, force_merge, result=None):
+        """合并转发：3 个文字 name 节点（平台/@作者/简介）+ 1 个媒体节点（全部媒体）。
+
+        实测 QQ 外显规则：
+        - 每条节点显示一行 name（昵称行），媒体内容预览占 1 行；
+        - 媒体全部放进单个节点 → 外显固定 1 行，图片再多也不增加行数；
+        - name 节点 content 用空文字（Plain("")）：外显仅 name 行、点开显示空格；
+          content 为空列表会显示「该消息类型暂不支持查看」。
+        """
         if not force_merge or not segs:
             return segs
         nodes = Nodes([])
         self_id = event.get_self_id()
-        # 节点名固定三行：平台 / @作者 / 简介（强制三行，不合并行）
-        # 79e9664 实测：QQ 合并转发卡片按 name 换行逐行显示，三条信息完整可见
-        node_name = "解析器"
+        # 3 个文字 name 节点：平台 / @作者 / 简介
+        lines = []
         if result is not None:
             try:
-                lines = []
-                lines.append(result.platform.display_name if (result.platform and result.platform.display_name) else "")
-                lines.append(f"@{result.author.name}" if (result.author and result.author.name) else "")
-                lines.append((result.title or "")[:30])
-                node_name = "\n".join(lines)
+                if result.platform and result.platform.display_name:
+                    lines.append(result.platform.display_name)
+                if result.author and result.author.name:
+                    lines.append(f"@{result.author.name}")
+                if result.title:
+                    lines.append(result.title[:30])
             except Exception:
                 pass
-        for seg in segs:
-            nodes.nodes.append(Node(uin=self_id, name=node_name, content=[seg]))
+        if not lines:
+            lines = ["解析器"]
+        for line in lines:
+            nodes.nodes.append(Node(uin=self_id, name=line, content=[Plain("")]))
+        # 1 个媒体节点：全部媒体放一起（外显固定 1 行）
+        nodes.nodes.append(Node(uin=self_id, name="视频解析", content=list(segs)))
         return [nodes]
 
     @staticmethod
