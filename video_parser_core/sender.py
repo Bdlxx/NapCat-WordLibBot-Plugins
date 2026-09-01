@@ -80,7 +80,11 @@ def _seg_to_cq(seg: BaseMessageComponent) -> dict:
             if isinstance(node, Node):
                 content = [_seg_to_cq(c) for c in (node.content or [])]
                 nodes.append({"type": "node", "data": {"uin": node.uin, "name": node.name, "content": content}})
-        return {"type": "forward", "data": {"messages": nodes}}
+        data = {"messages": nodes}
+        # 自定义外显 news（NapCat ForwardMsgBuilder 支持，控制合并转发卡片每行文字）
+        if getattr(seg, "news", None):
+            data["news"] = seg.news
+        return {"type": "forward", "data": data}
     # 兜底
     try:
         return seg.to_cq()
@@ -225,36 +229,34 @@ class MessageSender:
         return segs
 
     def _merge_segments_if_needed(self, event, segs, force_merge, result=None):
-        """合并转发：3 个文字 name 节点（平台/@作者/简介）+ 1 个媒体节点（全部媒体）。
+        """合并转发：单媒体节点（全部媒体）+ 自定义 news 控制卡片外显。
 
-        实测 QQ 外显规则：
-        - 每条节点显示一行 name（昵称行），媒体内容预览占 1 行；
-        - 媒体全部放进单个节点 → 外显固定 1 行，图片再多也不增加行数；
-        - name 节点 content 用空文字（Plain("")）：外显仅 name 行、点开显示空格；
-          content 为空列表会显示「该消息类型暂不支持查看」。
+        实测（NapCat ForwardMsgBuilder）：API 的 news 参数直接决定合并转发卡片
+        外显每一行文字；点开卡片显示节点实际内容。因此：
+        - 所有媒体放进 1 个节点 → 点开正常看全部图片/视频，外显固定 1 行；
+        - news 自定义为 平台/@作者/简介 → 外显正好 3 行，图片数量不影响外显。
         """
         if not force_merge or not segs:
             return segs
         nodes = Nodes([])
         self_id = event.get_self_id()
-        # 3 个文字 name 节点：平台 / @作者 / 简介
-        lines = []
+        # 单媒体节点：全部媒体放一起（点开可看，外显由 news 控制）
+        nodes.nodes.append(Node(uin=self_id, name="视频解析", content=list(segs)))
+        # 卡片外显 news：平台 / @作者 / 简介
+        news = []
         if result is not None:
             try:
                 if result.platform and result.platform.display_name:
-                    lines.append(result.platform.display_name)
+                    news.append({"text": result.platform.display_name})
                 if result.author and result.author.name:
-                    lines.append(f"@{result.author.name}")
+                    news.append({"text": f"@{result.author.name}"})
                 if result.title:
-                    lines.append(result.title[:30])
+                    news.append({"text": result.title[:30]})
             except Exception:
                 pass
-        if not lines:
-            lines = ["解析器"]
-        for line in lines:
-            nodes.nodes.append(Node(uin=self_id, name=line, content=[Plain("")]))
-        # 1 个媒体节点：全部媒体放一起（外显固定 1 行）
-        nodes.nodes.append(Node(uin=self_id, name="视频解析", content=list(segs)))
+        if not news:
+            news = [{"text": "视频解析"}]
+        nodes.news = news
         return [nodes]
 
     @staticmethod
