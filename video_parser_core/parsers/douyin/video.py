@@ -1,4 +1,5 @@
 from random import choice
+import re
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
@@ -60,8 +61,17 @@ class VideoData(Struct):
             return None
 
         play_addr = self.video.play_addr
+        # uri 可能是纯 video_id（如 tos-cn-ve-2774/xxx），也可能是完整 URL
         if play_addr.uri:
-            return play_addr.uri
+            uri = play_addr.uri
+            # 完整 URL：提取 obj 路径作为 video_id（抖音 play API 用 obj 路径）
+            m = re.search(r"/obj/(.+?)(?:\?|$)", uri)
+            if m:
+                return m.group(1)
+            # 纯 ID：去掉可能的域名前缀
+            if "://" in uri:
+                return uri.rstrip("/").split("/")[-1]
+            return uri
 
         for url in play_addr.url_list:
             query = parse_qs(urlparse(url).query)
