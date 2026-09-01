@@ -156,7 +156,9 @@ class MessageSender:
             render_card = render_card_override
         seg_count = len(light) + len(heavy) + (1 if render_card else 0)
 
-        force_merge = seg_count >= self.cfg.forward_threshold
+        # 有图片（图文/实况图）时总是合并转发：外显 3 行 news 卡片（平台/@作者/简介）；
+        # 纯单视频保持普通消息直发（视频+文字）
+        force_merge = seg_count >= self.cfg.forward_threshold or has_images
         if force_merge_override is not None:
             force_merge = force_merge_override
 
