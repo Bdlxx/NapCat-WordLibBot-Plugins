@@ -229,17 +229,15 @@ class MessageSender:
             return segs
         nodes = Nodes([])
         self_id = event.get_self_id()
-        # 节点名单行：@作者 | 简介（QQ 合并转发对 name 换行渲染异常，不用 \n）
+        # 节点名固定三行：平台 / @作者 / 简介（强制三行，不合并行）
         node_name = "解析器"
         if result is not None:
             try:
-                parts = []
-                if result.author and result.author.name:
-                    parts.append(f"@{result.author.name}")
-                if result.title:
-                    parts.append(result.title[:30])
-                if parts:
-                    node_name = " | ".join(parts)
+                lines = []
+                lines.append(result.platform.display_name if (result.platform and result.platform.display_name) else "")
+                lines.append(f"@{result.author.name}" if (result.author and result.author.name) else "")
+                lines.append((result.title or "")[:30])
+                node_name = "\n".join(lines)
             except Exception:
                 pass
         for seg in segs:
