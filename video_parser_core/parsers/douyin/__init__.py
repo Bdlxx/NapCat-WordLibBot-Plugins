@@ -245,32 +245,37 @@ class DouyinParser(BaseParser):
             cover_url = video_data.cover_url
             duration = video_data.video.duration if video_data.video else 0
             logger.debug(f"[抖音] 检测到视频内容，时长: {duration}秒")
-            video_headers = self._build_media_headers(url)
-            video_url = None
-            # play_addr.uri 为完整 CDN URL 时直接使用（实测可直接下载；
-            # play_token 重建的 aweme.snssdk.com play 端点对该 video_id 返回空）
-            if (
-                video_data.video.play_addr.uri
-                and "://" in video_data.video.play_addr.uri
-            ):
-                video_url = video_data.video.play_addr.uri
-            elif play_token := video_data.play_token:
-                try:
-                    probed = await self.probe_video_url(play_token, url)
-                    video_url = probed.url
-                    video_headers = probed.headers
-                    logger.debug(
-                        f"[抖音] play 端点探测成功，文件大小: {probed.size} 字节"
+            # duration=0 的 video 是图文背景音乐/占位（audio/mp4），
+            # 作为视频发送会变成「不到一秒的视频」，跳过
+            if duration <= 0:
+                logger.debug("[抖音] 视频时长为 0（背景音乐/占位），跳过不发送")
+            else:
+                video_headers = self._build_media_headers(url)
+                video_url = None
+                # play_addr.uri 为完整 CDN URL 时直接使用（实测可直接下载；
+                # play_token 重建的 aweme.snssdk.com play 端点对该 video_id 返回空）
+                if (
+                    video_data.video.play_addr.uri
+                    and "://" in video_data.video.play_addr.uri
+                ):
+                    video_url = video_data.video.play_addr.uri
+                elif play_token := video_data.play_token:
+                    try:
+                        probed = await self.probe_video_url(play_token, url)
+                        video_url = probed.url
+                        video_headers = probed.headers
+                        logger.debug(
+                            f"[抖音] play 端点探测成功，文件大小: {probed.size} 字节"
+                        )
+                    except ParseException as e:
+                        logger.warning(f"[抖音] play 端点探测失败，回退 play_addr: {e}")
+                video_url = video_url or video_data.video_url
+                if video_url:
+                    contents.append(
+                        self.create_video_content(
+                            video_url, cover_url, duration, headers=video_headers
+                        )
                     )
-                except ParseException as e:
-                    logger.warning(f"[抖音] play 端点探测失败，回退 play_addr: {e}")
-            video_url = video_url or video_data.video_url
-            if video_url:
-                contents.append(
-                    self.create_video_content(
-                        video_url, cover_url, duration, headers=video_headers
-                    )
-                )
 
         # 构建作者
         author = self.create_author(

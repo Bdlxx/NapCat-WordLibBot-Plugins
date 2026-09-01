@@ -229,19 +229,24 @@ class MessageSender:
         return segs
 
     def _merge_segments_if_needed(self, event, segs, force_merge, result=None):
-        """合并转发：单媒体节点（全部媒体）+ 自定义 news 控制卡片外显。
+        """合并转发：按类型分组节点（视频/音频/文件节点 + 图片/文字节点）+ 自定义 news。
 
-        实测（NapCat ForwardMsgBuilder）：API 的 news 参数直接决定合并转发卡片
-        外显每一行文字；点开卡片显示节点实际内容。因此：
-        - 所有媒体放进 1 个节点 → 点开正常看全部图片/视频，外显固定 1 行；
-        - news 自定义为 平台/@作者/简介 → 外显正好 3 行，图片数量不影响外显。
+        实测（NapCat ForwardMsgBuilder）：
+        - API 的 news 参数直接决定合并转发卡片外显每一行文字；点开显示节点实际内容；
+        - QQ 单条消息不支持「视频+图片」混合，同节点只渲染第一个媒体，
+          因此视频/音频/文件与图片必须分节点；图片可多张同节点（外显固定 1 行）。
         """
         if not force_merge or not segs:
             return segs
         nodes = Nodes([])
         self_id = event.get_self_id()
-        # 单媒体节点：全部媒体放一起（点开可看，外显由 news 控制）
-        nodes.nodes.append(Node(uin=self_id, name="视频解析", content=list(segs)))
+        # 重媒体（视频/音频/文件）与轻媒体（图片/文字）分节点
+        heavy = [s for s in segs if isinstance(s, (Video, Record, File))]
+        light = [s for s in segs if isinstance(s, (Image, Plain))]
+        if heavy:
+            nodes.nodes.append(Node(uin=self_id, name="视频解析", content=heavy))
+        if light:
+            nodes.nodes.append(Node(uin=self_id, name="视频解析", content=light))
         # 卡片外显 news：平台 / @作者 / 简介
         news = []
         if result is not None:
