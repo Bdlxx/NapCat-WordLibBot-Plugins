@@ -229,7 +229,9 @@ class MessageSender:
             return segs
         nodes = Nodes([])
         self_id = event.get_self_id()
-        # 节点名固定三行：平台 / @作者 / 简介（强制三行，不合并行）
+        # 节点名固定三行：平台 / @作者 / 简介
+        # 末尾追加一个空行：QQ 合并转发卡片对 name 换行渲染会多显示一行，
+        # 强制第 4 行为空避免内容重复
         node_name = "解析器"
         if result is not None:
             try:
@@ -237,7 +239,7 @@ class MessageSender:
                 lines.append(result.platform.display_name if (result.platform and result.platform.display_name) else "")
                 lines.append(f"@{result.author.name}" if (result.author and result.author.name) else "")
                 lines.append((result.title or "")[:30])
-                node_name = "\n".join(lines)
+                node_name = "\n".join(lines) + "\n"
             except Exception:
                 pass
         for seg in segs:

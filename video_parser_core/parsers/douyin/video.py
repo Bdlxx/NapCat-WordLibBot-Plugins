@@ -53,6 +53,11 @@ class VideoData(Struct):
     def video_url(self) -> str | None:
         if not self.video or not self.video.play_addr.url_list:
             return None
+        # url_list 里的 play URL 的 video_id 参数可能是畸形（整个 CDN URL），
+        # 用 play_token（已提取纯 obj 路径）重建正确 play URL
+        token = self.play_token
+        if token:
+            return f"https://aweme.snssdk.com/aweme/v1/play/?video_id={token}&ratio=720p"
         return choice(self.video.play_addr.url_list).replace("playwm", "play")
 
     @property
@@ -63,21 +68,31 @@ class VideoData(Struct):
         play_addr = self.video.play_addr
         # uri 可能是纯 video_id（如 tos-cn-ve-2774/xxx），也可能是完整 URL
         if play_addr.uri:
-            uri = play_addr.uri
-            # 完整 URL：提取 obj 路径作为 video_id（抖音 play API 用 obj 路径）
-            m = re.search(r"/obj/(.+?)(?:\?|$)", uri)
-            if m:
-                return m.group(1)
-            # 纯 ID：去掉可能的域名前缀
-            if "://" in uri:
-                return uri.rstrip("/").split("/")[-1]
-            return uri
+            return self._extract_video_id(play_addr.uri)
 
         for url in play_addr.url_list:
             query = parse_qs(urlparse(url).query)
             if video_id := query.get("video_id"):
-                return video_id[0]
+                return self._extract_video_id(video_id[0])
         return None
+
+    @staticmethod
+    def _extract_video_id(value: str) -> str | None:
+        """从 video_id/uri 提取抖音 play API 所需的纯 ID：
+        - 完整 URL（https://xxx.com/obj/tos-cn-ve-2774/abc）→ obj 路径
+        - obj 路径（tos-cn-ve-2774/abc）→ 原样
+        - 其他 URL → 末段"""
+        if not value:
+            return None
+        # 完整 URL 或含 obj 路径：提取 /obj/ 后内容
+        m = re.search(r"/obj/(.+?)(?:\?|$)", value)
+        if m:
+            return m.group(1)
+        # 纯 ID（可能带 / 路径）→ 原样
+        if "://" not in value:
+            return value
+        # 其他 URL → 末段
+        return value.rstrip("/").split("/")[-1]
 
     @property
     def cover_url(self) -> str | None:
