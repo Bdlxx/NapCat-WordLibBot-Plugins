@@ -247,7 +247,14 @@ class DouyinParser(BaseParser):
             logger.debug(f"[抖音] 检测到视频内容，时长: {duration}秒")
             video_headers = self._build_media_headers(url)
             video_url = None
-            if play_token := video_data.play_token:
+            # play_addr.uri 为完整 CDN URL 时直接使用（实测可直接下载；
+            # play_token 重建的 aweme.snssdk.com play 端点对该 video_id 返回空）
+            if (
+                video_data.video.play_addr.uri
+                and "://" in video_data.video.play_addr.uri
+            ):
+                video_url = video_data.video.play_addr.uri
+            elif play_token := video_data.play_token:
                 try:
                     probed = await self.probe_video_url(play_token, url)
                     video_url = probed.url

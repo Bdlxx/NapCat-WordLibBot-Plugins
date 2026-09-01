@@ -51,14 +51,18 @@ class VideoData(Struct):
 
     @property
     def video_url(self) -> str | None:
-        if not self.video or not self.video.play_addr.url_list:
+        if not self.video:
             return None
-        # url_list 里的 play URL 的 video_id 参数可能是畸形（整个 CDN URL），
-        # 用 play_token（已提取纯 obj 路径）重建正确 play URL
+        # play_addr.uri 是完整 CDN URL 时直接使用（实测可直接下载；
+        # 用 play_token 重建 aweme.snssdk.com/aweme/v1/play/ 对该 video_id 返回空）
+        if self.video.play_addr.uri and "://" in self.video.play_addr.uri:
+            return self.video.play_addr.uri
         token = self.play_token
         if token:
             return f"https://aweme.snssdk.com/aweme/v1/play/?video_id={token}&ratio=720p"
-        return choice(self.video.play_addr.url_list).replace("playwm", "play")
+        if self.video.play_addr.url_list:
+            return choice(self.video.play_addr.url_list).replace("playwm", "play")
+        return None
 
     @property
     def play_token(self) -> str | None:
