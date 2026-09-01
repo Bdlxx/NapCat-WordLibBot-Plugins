@@ -229,9 +229,9 @@ class MessageSender:
             return segs
         nodes = Nodes([])
         self_id = event.get_self_id()
-        # 节点名两行：平台@作者\n简介
-        # QQ 合并转发卡片每条只显示 name 前两行（NapCat 实测），
-        # 用两行让平台/作者/简介都可见
+        # 节点名单行：平台@作者 简介（空格分隔）
+        # QQ 合并转发卡片实测：name 含换行符(\n)会被截断到第一行加省略号，
+        # 单行空格分隔可完整显示「平台@作者 简介：[图片]」
         node_name = "解析器"
         if result is not None:
             try:
@@ -242,7 +242,7 @@ class MessageSender:
                     line1 += f"@{result.author.name}"
                 title = (result.title or "")[:30]
                 if line1 and title:
-                    node_name = f"{line1}\n{title}"
+                    node_name = f"{line1} {title}"
                 elif line1:
                     node_name = line1
                 elif title:
