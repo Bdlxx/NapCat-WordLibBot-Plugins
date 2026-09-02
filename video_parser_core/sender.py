@@ -158,7 +158,13 @@ class MessageSender:
 
         # 有图片（图文/实况图）时总是合并转发：外显 3 行 news 卡片（平台/@作者/简介）；
         # 纯单视频保持普通消息直发（视频+文字）
-        force_merge = seg_count >= self.cfg.forward_threshold or has_images
+        # 推特平台：所有解析（含单视频）都合并转发，外显 3 行卡片
+        is_twitter = bool(
+            result.platform and result.platform.name == "twitter"
+        )
+        force_merge = (
+            seg_count >= self.cfg.forward_threshold or has_images or is_twitter
+        )
         if force_merge_override is not None:
             force_merge = force_merge_override
 
