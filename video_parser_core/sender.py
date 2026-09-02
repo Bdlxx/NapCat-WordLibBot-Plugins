@@ -242,6 +242,14 @@ class MessageSender:
             return segs
         nodes = Nodes([])
         self_id = event.get_self_id()
+        # 点开合并转发的头像 = 触发者（请求解析的用户）QQ 头像：
+        # NapCat 按 node 的 uin 从 q.qlogo.cn 拉头像，uin 设触发者 QQ 即显示其头像
+        trigger_uin = ""
+        try:
+            trigger_uin = str(event.event.get("user_id") or "")
+        except Exception:
+            pass
+        node_uin = trigger_uin or self_id
         # 发送者名称 = 作者用户名（显示名优先，其次账号/昵称）：
         # 点开合并转发后每条节点显示为作者身份（外显 news 不受影响）
         node_name = "视频解析"
@@ -256,9 +264,9 @@ class MessageSender:
         heavy = [s for s in segs if isinstance(s, (Video, Record, File))]
         light = [s for s in segs if isinstance(s, (Image, Plain))]
         if heavy:
-            nodes.nodes.append(Node(uin=self_id, name=node_name, content=heavy))
+            nodes.nodes.append(Node(uin=node_uin, name=node_name, content=heavy))
         if light:
-            nodes.nodes.append(Node(uin=self_id, name=node_name, content=light))
+            nodes.nodes.append(Node(uin=node_uin, name=node_name, content=light))
         # 帖子信息文字节点：author.description 存显示名（用户名）且 ≠ 账号时，
         # 点开合并转发可见完整「用户名(账号) + 正文」（外显 news 不受影响）
         info_lines = []
@@ -281,7 +289,7 @@ class MessageSender:
             nodes.nodes.insert(
                 0,
                 Node(
-                    uin=self_id,
+                    uin=node_uin,
                     name="帖子信息",
                     content=[Plain("\n".join(info_lines))],
                 ),
