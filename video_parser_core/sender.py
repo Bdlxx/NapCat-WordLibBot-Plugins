@@ -242,13 +242,23 @@ class MessageSender:
             return segs
         nodes = Nodes([])
         self_id = event.get_self_id()
+        # 发送者名称 = 作者用户名（显示名优先，其次账号/昵称）：
+        # 点开合并转发后每条节点显示为作者身份（外显 news 不受影响）
+        node_name = "视频解析"
+        if result is not None and result.author:
+            try:
+                nm = result.author.description or result.author.name
+                if nm:
+                    node_name = nm
+            except Exception:
+                pass
         # 重媒体（视频/音频/文件）与轻媒体（图片/文字）分节点
         heavy = [s for s in segs if isinstance(s, (Video, Record, File))]
         light = [s for s in segs if isinstance(s, (Image, Plain))]
         if heavy:
-            nodes.nodes.append(Node(uin=self_id, name="视频解析", content=heavy))
+            nodes.nodes.append(Node(uin=self_id, name=node_name, content=heavy))
         if light:
-            nodes.nodes.append(Node(uin=self_id, name="视频解析", content=light))
+            nodes.nodes.append(Node(uin=self_id, name=node_name, content=light))
         # 帖子信息文字节点：author.description 存显示名（用户名）且 ≠ 账号时，
         # 点开合并转发可见完整「用户名(账号) + 正文」（外显 news 不受影响）
         info_lines = []
