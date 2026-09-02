@@ -74,23 +74,28 @@ class TwitterParser(BaseParser):
         if m := re.search(r"status/(\d+)", url):
             tweet_id = m.group(1)
         author_name = None
+        display_name = None
         title = None
         if tweet_id:
             try:
                 info = await self._fetch_tweet_info(tweet_id)
                 if info:
-                    author_name = info.get("author")
-                    title = info.get("text")
+                    author_name = info.get("author")  # 账号 screen_name
+                    display_name = info.get("display_name")  # 显示名（用户名）
+                    title = info.get("text")  # 正文
             except Exception:
                 pass
 
         return self.parse_twitter_html(
-            html_content, author_name=author_name, title=title
+            html_content,
+            author_name=author_name,
+            display_name=display_name,
+            title=title,
         )
 
     async def _fetch_tweet_info(self, tweet_id: str) -> dict[str, Any] | None:
-        """获取推文作者（screen_name）与正文：fxtwitter 优先，oEmbed 兜底"""
-        # 1. fxtwitter（信息全：作者 + 正文）
+        """获取推文信息：fxtwitter 优先（账号+显示名+正文），oEmbed 兜底（账号+显示名）"""
+        # 1. fxtwitter（信息全：账号 + 显示名 + 正文）
         try:
             async with self.session.get(
                 f"https://api.fxtwitter.com/status/{tweet_id}",
@@ -100,15 +105,16 @@ class TwitterParser(BaseParser):
                 if resp.status == 200:
                     j = await resp.json()
                     tw = j.get("tweet") or {}
-                    author = (tw.get("author") or {})
+                    author = tw.get("author") or {}
                     if author.get("screen_name"):
                         return {
                             "author": author.get("screen_name"),
+                            "display_name": author.get("name") or "",
                             "text": (tw.get("text") or "")[:300],
                         }
         except Exception:
             pass
-        # 2. oEmbed 兜底（author_url 含 handle，如 https://x.com/CandyXQwQ）
+        # 2. oEmbed 兜底（author_name=显示名，author_url 含账号 handle）
         try:
             async with self.session.get(
                 "https://publish.twitter.com/oembed",
@@ -121,7 +127,11 @@ class TwitterParser(BaseParser):
                     author_url = j.get("author_url") or ""
                     handle = author_url.rstrip("/").split("/")[-1]
                     if handle:
-                        return {"author": handle, "text": ""}
+                        return {
+                            "author": handle,
+                            "display_name": j.get("author_name") or "",
+                            "text": "",
+                        }
         except Exception:
             pass
         return None
@@ -130,13 +140,15 @@ class TwitterParser(BaseParser):
         self,
         html_content: str,
         author_name: str | None = None,
+        display_name: str | None = None,
         title: str | None = None,
     ) -> ParseResult:
         """解析 Twitter HTML 内容
 
         Args:
             html_content (str): Twitter HTML 内容（xdown 返回，含媒体下载链接）
-            author_name (str | None): 作者 screen_name（fxtwitter/oEmbed 补充）
+            author_name (str | None): 作者账号 screen_name（fxtwitter/oEmbed 补充）
+            display_name (str | None): 作者显示名/用户名（fxtwitter/oEmbed 补充）
             title (str | None): 推文正文（fxtwitter 补充）
 
         Returns:
@@ -199,7 +211,10 @@ class TwitterParser(BaseParser):
 
         return self.result(
             title=title,
-            author=self.create_author(author_name or "无用户名"),
+            # name=账号(screen_name) 用于外显 @账号；description 存显示名/用户名
+            author=self.create_author(
+                author_name or "无用户名", description=display_name or None
+            ),
             contents=contents,
         )
         # # 4. 提取Twitter ID

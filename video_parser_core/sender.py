@@ -249,6 +249,33 @@ class MessageSender:
             nodes.nodes.append(Node(uin=self_id, name="视频解析", content=heavy))
         if light:
             nodes.nodes.append(Node(uin=self_id, name="视频解析", content=light))
+        # 帖子信息文字节点：author.description 存显示名（用户名）且 ≠ 账号时，
+        # 点开合并转发可见完整「用户名(账号) + 正文」（外显 news 不受影响）
+        info_lines = []
+        if result is not None:
+            try:
+                if (
+                    result.author
+                    and result.author.description
+                    and result.author.description != result.author.name
+                ):
+                    info_lines.append(
+                        f"{result.author.description} (@{result.author.name})"
+                    )
+                    body = (result.title or result.text or "").strip()
+                    if body:
+                        info_lines.append(body)
+            except Exception:
+                pass
+        if info_lines:
+            nodes.nodes.insert(
+                0,
+                Node(
+                    uin=self_id,
+                    name="帖子信息",
+                    content=[Plain("\n".join(info_lines))],
+                ),
+            )
         # 卡片外显 news：平台 / @作者 / 简介
         news = []
         if result is not None:
