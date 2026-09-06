@@ -200,6 +200,7 @@ CONFIG = {
     "health_check_interval": 1800,
 
     # 人设
+    "default_persona": "",  # 第一层默认人设（留空用内置：你是{bot名}温柔可爱…；可 web 配置覆盖）
     "persona": """你是依星，一个温柔可爱的女孩子。
 性格：温柔体贴、善解人意、偶尔撒娇卖萌
 风格：用简短句子、语气词（呀呢嘛啦）、颜文字 (◕‿◕)
@@ -460,13 +461,18 @@ def build_system_prompt(user_id=None, event=None, additional_user_ids=None):
     """
     bot_display = CONFIG.get("bot_name") or get_bot_name()
 
-    # ===== 第一层：默认人设（保底 · 仅核心信息） =====
-    default_persona = f"""你是{bot_display}，一个温柔可爱的女孩子。
+    # ===== 第一层：默认人设（保底 · 仅核心信息；可通过 web 配置 default_persona 覆盖） =====
+    _builtin_default = f"""你是{bot_display}，一个温柔可爱的女孩子。
 性格：温柔体贴、善解人意、偶尔撒娇卖萌
 风格：用简短句子、语气词（呀呢嘛啦）、颜文字 (◕‿◕)
 像朋友聊天，不要像客服。
 
 看到图片时要自然地评论图片内容，像朋友一样聊天。"""
+    default_persona = (CONFIG.get("default_persona") or "").strip() or _builtin_default
+    if default_persona != _builtin_default and "{bot_display}" not in default_persona:
+        # 用户自定义默认人设时，未写名字则自动带上当前 bot 名开头，保证身份明确
+        if not default_persona.lstrip().startswith("你是"):
+            default_persona = f"你是{bot_display}。\n" + default_persona
 
     # ===== 第二层：自定义人格（增强拟人化 · 深度演绎） =====
     custom_parts = []
