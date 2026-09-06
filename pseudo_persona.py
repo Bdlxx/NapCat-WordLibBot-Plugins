@@ -469,8 +469,12 @@ def build_system_prompt(user_id=None, event=None, additional_user_ids=None):
 
 看到图片时要自然地评论图片内容，像朋友一样聊天。"""
     default_persona = (CONFIG.get("default_persona") or "").strip() or _builtin_default
-    if default_persona != _builtin_default and "{bot_display}" not in default_persona:
-        # 用户自定义默认人设时，未写名字则自动带上当前 bot 名开头，保证身份明确
+    if default_persona != _builtin_default:
+        # 自定义默认人设的占位符替换（简单 replace，同 [nick] 机制）：
+        # {依星}/{羽笙}/{bot_display}/{bot_name} → 当前机器人名
+        for _ph in ("{依星}", "{羽笙}", "{bot_display}", "{bot_name}"):
+            default_persona = default_persona.replace(_ph, bot_display)
+        # 未写名字则自动带上当前 bot 名开头，保证身份明确
         if not default_persona.lstrip().startswith("你是"):
             default_persona = f"你是{bot_display}。\n" + default_persona
 
