@@ -478,21 +478,10 @@ def build_system_prompt(user_id=None, event=None, additional_user_ids=None):
         if not default_persona.lstrip().startswith("你是"):
             default_persona = f"你是{bot_display}。\n" + default_persona
 
-    # ===== 第二层：自定义人格（增强拟人化 · 深度演绎） =====
-    custom_parts = []
-    user_persona = CONFIG.get("user_persona", "")
-    plugin_persona = CONFIG.get("persona", "")
+    # ===== 第二层：自定义人格（user_persona，深度演绎 · 拟人化核心） =====
+    user_persona = CONFIG.get("user_persona", "").strip()
     if user_persona:
-        custom_parts.append(user_persona)
-    # 旧版配置残留的默认人设（"你是依星…温柔可爱…像朋友聊天"）识别并忽略，避免重复叠加
-    if plugin_persona and plugin_persona != default_persona:
-        _legacy_default = ("一个温柔可爱的女孩子" in plugin_persona and "像朋友聊天" in plugin_persona)
-        if not _legacy_default:
-            custom_parts.append(plugin_persona)
-
-    if custom_parts:
-        # 启用自定义人格层：先给基础设定，再要求深度人格判定与演绎
-        combined = default_persona + "\n\n【自定义人格设定】\n" + "\n".join(custom_parts)
+        combined = default_persona + "\n\n【自定义人格设定】\n" + user_persona
         combined += "\n\n【深度人格演绎指令】\n" \
             "请以上述「自定义人格设定」为准进行深度人格特征判定与演绎：" \
             "内化其性格底色、价值取向、说话习惯与情绪反应，作为有血有肉的角色自然交谈；" \
@@ -511,6 +500,14 @@ def build_system_prompt(user_id=None, event=None, additional_user_ids=None):
     memory_context = build_memory_context(user_ids)
     if memory_context:
         combined += "\n\n[长期记忆]\n" + memory_context
+
+    # ===== 系统补充指令（persona：群聊伪装/输出规范，非人格层）——放在 system prompt 最后 =====
+    plugin_persona = (CONFIG.get("persona") or "").strip()
+    if plugin_persona and plugin_persona != default_persona:
+        # 旧版配置残留的默认人设（"你是…温柔可爱…像朋友聊天"）识别并忽略，避免重复叠加
+        _legacy_default = ("一个温柔可爱的女孩子" in plugin_persona and "像朋友聊天" in plugin_persona)
+        if not _legacy_default:
+            combined += "\n\n[系统补充指令]\n" + plugin_persona
 
     nick = get_nickname(user_id) if user_id else None
     if not nick and event:
