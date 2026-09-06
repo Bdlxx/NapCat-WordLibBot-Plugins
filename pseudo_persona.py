@@ -36,15 +36,6 @@ LONG_TERM_MEMORY_FILE = os.path.join(os.path.dirname(__file__), "..", "data", "l
 _memory_cache = None
 _memory_mtime = 0
 
-
-def plog(level, msg):
-    """分级日志"""
-    try:
-        from utils.log import plugin_log
-        plugin_log("伪人", level, msg)
-    except Exception:
-        print(f"[伪人] {msg}")
-
 def _load_memories():
     global _memory_cache, _memory_mtime
     try:
@@ -226,9 +217,9 @@ def load_config():
             with open(config_path, "r", encoding="utf-8") as f:
                 loaded = json.load(f)
                 CONFIG.update(loaded)
-                plog("info", f"配置加载成功，当前模型: {CONFIG.get('current_model')}")
+                print(f"[伪人] 配置加载成功，当前模型: {CONFIG.get('current_model')}")
     except Exception as e:
-        plog("error", f"加载配置失败: {e}")
+        print(f"[伪人] 加载配置失败: {e}")
 
 # 配置热更新（文件变化自动重载，无需重启 Bot）
 _PERSONA_CFG_PATH = os.path.join(os.path.dirname(__file__), "..", "data", "persona_config.json")
@@ -277,7 +268,7 @@ def _health_check():
     if not api_key:
         return
     try:
-        plog("info", f"健康检查: 测试模型 {primary}...")
+        print(f"[伪人] 健康检查: 测试模型 {primary}...")
         resp = requests.post(
             model_config["api_url"],
             headers={"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"},
@@ -286,13 +277,13 @@ def _health_check():
         )
         if resp.status_code == 200:
             with _model_lock:
-                plog("info", f"健康检查通过，切回模型 {primary}")
+                print(f"[伪人] 健康检查通过，切回模型 {primary}")
                 _active_model = None
                 _primary_fail_time = 0
     except:
         with _model_lock:
             _primary_fail_time = time.time()
-            plog("error", f"健康检查失败，模型 {primary} 仍不可用")
+            print(f"[伪人] 健康检查失败，模型 {primary} 仍不可用")
 
 def _health_check_loop():
     """后台健康检查循环"""
@@ -417,7 +408,7 @@ def clear_history(event=None, key=None):
                 del message_history[k]
         else:
             message_history.clear()
-    plog("info", f"历史已清除")
+    print("[伪人] 历史已清除")
 
 def is_at_me(event):
     bot_qq = str(event.get("self_id", get_config("BOT_QQ", "")))
@@ -455,7 +446,7 @@ def download_image_as_base64(url):
         if resp.status_code == 200:
             return base64.b64encode(resp.content).decode("utf-8")
     except Exception as e:
-        plog("error", f"下载图片失败: {e}")
+        print(f"[伪人] 下载图片失败: {e}")
     return None
 
 def build_system_prompt(user_id=None, event=None, additional_user_ids=None):
@@ -564,7 +555,7 @@ def call_ai(prompt, context, images, user_id=None, event=None):
                 msg = {"role": "user", "content": content}
                 messages.append(msg)
 
-            plog("info", f"尝试模型: {attempt}, 消息: {len(messages)}, 图片: {len(images)}")
+            print(f"[伪人] 尝试模型: {attempt}, 消息: {len(messages)}, 图片: {len(images)}")
 
             import time as _time
             _start = _time.time()
@@ -575,18 +566,18 @@ def call_ai(prompt, context, images, user_id=None, event=None):
                 timeout=CONFIG.get("api_timeout", 90)
             )
             _elapsed = _time.time() - _start
-            plog("info", f"返回耗时: {_elapsed:.1f}s, 状态码: {resp.status_code}")
+            print(f"[伪人] 返回耗时: {_elapsed:.1f}s, 状态码: {resp.status_code}")
 
             if resp.status_code == 200:
                 with _model_lock:
                     if attempt == primary and _active_model:
-                        plog("info", f"主模型 {primary} 已恢复，切回")
+                        print(f"[伪人] 主模型 {primary} 已恢复，切回")
                         _active_model = None
                         _primary_fail_time = 0
                     elif attempt == backup and _active_model is None:
                         _active_model = backup
                         _primary_fail_time = _time.time()
-                        plog("warn", f"主模型 {primary} 不可用，切换至 {backup}")
+                        print(f"[伪人] 主模型 {primary} 不可用，切换至 {backup}")
                 return resp.json()["choices"][0]["message"]["content"], None
             last_error = f"{attempt} API 错误: {resp.status_code}"
         except Exception as e:
@@ -595,9 +586,9 @@ def call_ai(prompt, context, images, user_id=None, event=None):
                 if attempt == primary:
                     _active_model = backup
                     _primary_fail_time = time.time()
-                    plog("error", f"主模型 {primary} 失败，切换至 {backup}: {e}")
+                    print(f"[伪人] 主模型 {primary} 失败，切换至 {backup}: {e}")
                 else:
-                    plog("error", f"备份模型 {backup} 也失败: {e}")
+                    print(f"[伪人] 备份模型 {backup} 也失败: {e}")
 
     return None, last_error
 
@@ -752,6 +743,11 @@ def handle(event):
 
     if not text and not images:
         return False
+
+    # ===== 屏蔽词：其他插件的功能指令不当作闲聊，放行给对应插件 =====
+    # （视频解析等插件按字母序在本插件之后，若不放行会被私聊/触发逻辑拦截）
+    if text and any(_kw in text for _kw in ("B站登录", "b站登录", "开启视频解析", "关闭视频解析")):
+        return False
     
     # 检查触发条件
     triggered = False
@@ -760,12 +756,12 @@ def handle(event):
     # 触发判定：私聊直接对话；群聊按 @ / 提及机器人名触发
     if msg_type == "private":
         triggered = True  # 私聊默认直接对话，无需 @ 或提及名字
-        plog("info", f"私聊触发")
+        print("[伪人] 私聊触发")
     elif text and bot_name in text:
-        plog("info", f"关键词触发: {text}")
+        print(f"[伪人] 关键词触发: {text}")
         triggered = True
     elif is_at_me(event):
-        plog("info", f"被 @ 触发")
+        print("[伪人] 被 @ 触发")
         triggered = True
     
     has_image = len(images) > 0
@@ -807,7 +803,7 @@ def handle(event):
         response, error = call_ai(clean_text, context, images, user_id=user_id, event=event)
 
         if error:
-            plog("info", f"{error}")
+            print(f"[伪人] {error}")
 
         if not response:
             response = msg("no_reply", "唔...我好像有点累了，待会再聊吧~")
@@ -836,7 +832,7 @@ def handle(event):
             # 将 [@数字] 转为 QQ @ 消息段
             msg = _build_at_segments(part) if "[@" in part else part
             send_message(event, msg)
-            plog("info", f"发送: {part}")
+            print(f"[伪人] 发送: {part}")
     finally:
         session_lock.release()
 
