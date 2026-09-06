@@ -131,9 +131,62 @@ def _cmd_disable(event, raw, kw):
     return True
 
 
+def _cmd_bili_login(event, raw, kw):
+    """B站扫码登录：生成二维码，手机B站APP扫码后自动保存凭证（绕过412风控）"""
+    import asyncio
+    import threading
+
+    try:
+        from plugins.parser_bridge import get_cache_dir, host_to_container
+        from video_parser_core.config import PluginConfig as _PCfg
+        from video_parser_core.parsers.bilibili.login import BilibiliLogin
+
+        _pcfg = _PCfg()
+        _pcfg.load_from_video_config(CONFIG_FILE)
+        login = BilibiliLogin(_pcfg)
+
+        loop = asyncio.new_event_loop()
+        try:
+            qr_bytes = loop.run_until_complete(login.login_with_qrcode())
+        finally:
+            loop.close()
+
+        qr_path = os.path.join(get_cache_dir(), "bili_login_qr.png")
+        with open(qr_path, "wb") as f:
+            f.write(qr_bytes)
+        send_message(
+            event,
+            [
+                {"type": "image", "data": {"file": host_to_container(qr_path)}},
+                {"type": "text", "data": {"text": "请用哔哩哔哩APP扫码登录（约2分钟内有效）"}},
+            ],
+        )
+
+        def _poll_qr():
+            try:
+                async def _run():
+                    async for state in login.check_qr_state():
+                        send_message(event, state)
+                _loop = asyncio.new_event_loop()
+                try:
+                    _loop.run_until_complete(_run())
+                finally:
+                    _loop.close()
+            except Exception as e:
+                vlog("error", f"B站扫码状态轮询异常: {e}")
+
+        threading.Thread(target=_poll_qr, daemon=True).start()
+        return True
+    except Exception as e:
+        vlog("error", f"B站扫码登录失败: {e}")
+        send_message(event, f"B站登录失败: {e}")
+        return True
+
+
 # 注册指令：名称 / 触发词 / 描述 / 处理函数 / 权限 / 匹配方式
 registry.register("开启视频解析", ["开启视频解析"], "开启视频解析（群内=本群，私聊=全局）", _cmd_enable, master_only=True, kind="suffix")
 registry.register("关闭视频解析", ["关闭视频解析"], "关闭视频解析（群内=本群，私聊=全局）", _cmd_disable, master_only=True, kind="suffix")
+registry.register("B站登录", ["B站登录", "b站登录"], "B站扫码登录（生成二维码，手机B站APP扫码，绕过412风控）", _cmd_bili_login, master_only=True, kind="suffix")
 
 # 同步指令中文名到配置（Web 面板展示可读指令名）
 _CONFIG.setdefault("command_labels", {}).update(registry.labels())
