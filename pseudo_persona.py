@@ -393,7 +393,9 @@ def get_context_for_ai(event):
             prefix = f"{nick}({uid}): " if nick else f"u{uid}: "
             msg = {"role": "user", "content": prefix + record["content"]}
         else:
-            msg = {"role": record["role"], "content": f"依星: {record['content']}"}
+            # assistant/系统消息保持原始内容：勿加「依星:」前缀，
+            # 否则 AI 看到历史里自己带前缀会模仿输出「依星: ...」
+            msg = {"role": record["role"], "content": record["content"]}
         context.append(msg)
     return context
 
