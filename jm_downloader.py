@@ -93,16 +93,6 @@ _active_tasks = {}   # group_id -> {ts, detail_only}
 _task_lock = threading.Lock()
 
 
-def jlog(level, msg):
-    """JM下载 分级日志"""
-    try:
-        from utils.log import plugin_log
-        plugin_log("JM下载", level, msg)
-    except Exception:
-        print(f"[JM下载] {msg}")
-
-
-
 # ========== 配置读写（热更新）==========
 def _load_config():
     global _CONFIG
@@ -129,7 +119,7 @@ def _save_config():
         with open(CONFIG_FILE, "w", encoding="utf-8") as f:
             json.dump(_CONFIG, f, ensure_ascii=False, indent=2)
     except Exception as e:
-        jlog("error", f"配置保存失败: {e}")
+        print(f"[JM下载] 配置保存失败: {e}")
 
 
 _CONFIG_MTIME = 0
@@ -232,9 +222,9 @@ def _http_send_msg(event, message, timeout=30):
         data = r.json()
         if data.get("status") == "ok" and data.get("data"):
             return data["data"].get("message_id")
-        jlog("error", f"HTTP发送失败: {data}")
+        print(f"[JM下载] HTTP发送失败: {data}")
     except Exception as e:
-        jlog("error", f"HTTP发送异常: {e}")
+        print(f"[JM下载] HTTP发送异常: {e}")
     return None
 
 
@@ -249,11 +239,11 @@ def _schedule_recall(message_id, seconds):
                          params={"message_id": message_id, "access_token": token}, timeout=15)
             data = r.json()
             if data.get("status") == "ok":
-                jlog("info", f"已撤回消息 {message_id}")
+                print(f"[JM下载] 已撤回消息 {message_id}")
             else:
-                jlog("error", f"撤回失败 {message_id}: {data.get('message','')[:80]}")
+                print(f"[JM下载] 撤回失败 {message_id}: {data.get('message','')[:80]}")
         except Exception as e:
-            jlog("error", f"撤回失败 {message_id}: {e}")
+            print(f"[JM下载] 撤回失败 {message_id}: {e}")
     t = threading.Timer(max(1, int(seconds)), _do_recall)
     t.daemon = True
     t.start()
@@ -317,6 +307,11 @@ class _Debouncer:
         """基于完整下载指令的防抖（jm <ids> 相同请求）"""
         return self._hit(session, f"link:{link}")
 
+    def hit_user_link(self, user: str, link: str) -> bool:
+        """同一用户相同下载指令防抖：用户重复发送相同内容时仅解析一次，
+        不影响其他用户发送相同请求"""
+        return self._hit(f"user:{user}", f"link:{link}")
+
     def hit_resource(self, session: str, resource_id: str) -> bool:
         """基于本子 ID 的防抖（同一本子不重复下载）"""
         return self._hit(session, f"res:{resource_id}")
@@ -335,17 +330,19 @@ def _start_task(event, ids, detail_only=False):
     group_id = str(event.get("group_id") or event.get("user_id") or 0)
     session = _session_key(event)
 
-    # link 防抖：相同 `jm <ids>` 指令在间隔内不重复响应
+    # 同用户相同指令防抖：同一用户连续发送相同 jm 请求时仅解析一次
+    # （不同用户发相同内容不受影响，各自正常解析）
     link = f"{'详情' if detail_only else '下载'} {','.join(sorted(ids))}"
-    if _debouncer.hit_link(session, link):
-        jlog("warn", f"链接防抖: {link}")
+    user = str(event.get("user_id") or 0)
+    if _debouncer.hit_user_link(user, link):
+        print(f"[JM下载] 同用户重复指令防抖: {link}")
         return
 
-    # 资源防抖：任一本子 ID 在间隔内已请求过，跳过本次（避免重复下载）
+    # 资源防抖：任一本子 ID 在会话内已请求过，跳过本次（避免同会话重复下载）
     if not detail_only:
         for i in ids:
             if _debouncer.hit_resource(session, i):
-                jlog("warn", f"本子 {i} 防抖中，跳过重复下载")
+                print(f"[JM下载] 本子 {i} 防抖中，跳过重复下载")
                 return
 
     with _task_lock:
@@ -369,7 +366,7 @@ def _run_task(event, ids, detail_only):
                 prefix=int(cfg("recall_prefix_seconds", 30)),
                 pdf=int(cfg("recall_pdf_seconds", 60))), recall_list)
         _recall_send(event, _l("querying").format(ids="、".join(ids)), recall_list)
-        jlog("info", f"任务开始 group={group_id} ids={ids} detail_only={detail_only}")
+        print(f"[JM下载] 任务开始 group={group_id} ids={ids} detail_only={detail_only}")
 
         task_id = f"{int(time.time())}_{os.getpid()}"
         yml_path = os.path.join(DATA_DIR, f"jm_option_{task_id}.yml")
@@ -428,7 +425,7 @@ def _run_task(event, ids, detail_only):
         stop_read["flag"] = True
         rt.join(timeout=3)
         rc = proc.returncode
-        jlog("info", f"子进程退出码 {rc}")
+        print(f"[JM下载] 子进程退出码 {rc}")
 
         result = None
         if result_path and os.path.exists(result_path):
@@ -440,12 +437,12 @@ def _run_task(event, ids, detail_only):
 
         if not result or not result.get("ok"):
             err = (result or {}).get("error", f"子进程退出码 {rc}")
-            jlog("error", f"任务失败: {err}")
+            print(f"[JM下载] 任务失败: {err}")
             _recall_send(event, _l("fail").format(err=err), recall_list)
             return
 
         if detail_only:
-            jlog("info", f"详情查询完成 group={group_id}")
+            print(f"[JM下载] 详情查询完成 group={group_id}")
             return
 
         if cfg("send_pdf", True):
@@ -541,10 +538,10 @@ def _send_pdfs(event, result, task_id=None, recall_list=None):
                 f.write("ok")
             os.remove(probe)
             cache_dir_used = (host_root, container_root, pdf_cache_dir)
-            jlog("info", f"使用NapCat共享目录: {host_root}")
+            print(f"[JM下载] 使用NapCat共享目录: {host_root}")
             break
         except Exception as e:
-            jlog("warn", f"共享目录不可写 {host_root}: {e}")
+            print(f"[JM下载] 共享目录不可写 {host_root}: {e}")
             continue
     if cache_dir_used is None:
         _recall_send(event, _l("send_fail") + f"\n本地文件保留在: {os.path.dirname(pdfs[0])}", recall_list)
@@ -553,18 +550,18 @@ def _send_pdfs(event, result, task_id=None, recall_list=None):
     _, container_root, pdf_cache_dir = cache_dir_used
     for p in pdfs:
         if not os.path.exists(p):
-            jlog("warn", f"PDF不存在: {p}")
+            print(f"[JM下载] PDF不存在: {p}")
             continue
         fname = os.path.basename(p)
         dest = os.path.join(pdf_cache_dir, fname)
         try:
             shutil.copy2(p, dest)
         except Exception as e:
-            jlog("error", f"复制PDF失败 {p} -> {dest}: {e}")
+            print(f"[JM下载] 复制PDF失败 {p} -> {dest}: {e}")
             continue
         container_path = os.path.join(container_root, "jm_pdf", fname)
         sent.append((dest, container_path))
-        jlog("info", f"PDF已就绪: {p} -> {container_path}")
+        print(f"[JM下载] PDF已就绪: {p} -> {container_path}")
 
     if not sent:
         _recall_send(event, _l("send_fail") + f"\n本地文件保留在: {os.path.dirname(pdfs[0])}", recall_list)
@@ -587,18 +584,18 @@ def _send_pdfs(event, result, task_id=None, recall_list=None):
             mid = _http_send_msg(event, [{"type": "file", "data": {"file": container_path}}], timeout=60)
             if mid is not None:
                 sent_ok += 1
-                jlog("info", f"PDF发送成功: {container_path} (mid={mid})")
+                print(f"[JM下载] PDF发送成功: {container_path} (mid={mid})")
                 if cfg("recall_enabled", False):
                     if recall_list is not None:
                         recall_list.append(mid)
                     # 文件消息撤回：从真实发送成功起，等待较长窗口（file_secs）
                     _schedule_recall(mid, file_secs)
             else:
-                jlog("error", f"PDF发送失败(HTTP无返回): {container_path}")
+                print(f"[JM下载] PDF发送失败(HTTP无返回): {container_path}")
                 # 回退 WS 尽力发送（无法确认真实发出，不参与完成提醒判定）
                 send_message(event, [{"type": "file", "data": {"file": container_path}}])
         except Exception as e:
-            jlog("error", f"发送PDF异常 {container_path}: {e}")
+            print(f"[JM下载] 发送PDF异常 {container_path}: {e}")
         time.sleep(1.5)
 
     # PDF 发送完成提醒：仅在确认 NapCat 真实发送成功（拿到 message_id）后发送
@@ -614,7 +611,7 @@ def _send_pdfs(event, result, task_id=None, recall_list=None):
             delay = max(30, int(cfg("cleanup_delay_seconds", 600)))
         except (TypeError, ValueError):
             delay = 600
-        jlog("info", f"将在 {delay}s 后清理下载与PDF文件")
+        print(f"[JM下载] 将在 {delay}s 后清理下载与PDF文件")
         threading.Timer(delay, _cleanup_task_files, args=(pdfs, sent, task_id)).start()
 
 
@@ -643,7 +640,7 @@ def _cleanup_task_files(pdfs, sent, task_id):
                 os.rmdir(pdf_task_dir)  # 仅删除空目录
             except Exception:
                 pass
-    jlog("info", f"已清理下载与PDF文件")
+    print("[JM下载] 已清理下载与PDF文件")
 
 
 # ========== 自动更新 jmcomic 库 ==========
@@ -664,24 +661,24 @@ def check_and_update():
         r = requests.get("https://pypi.org/pypi/jmcomic/json", timeout=15)
         latest = r.json()["info"]["version"]
     except Exception as e:
-        jlog("error", f"获取 jmcomic 最新版本失败: {e}")
+        print(f"[JM下载] 获取 jmcomic 最新版本失败: {e}")
         return None
     installed = _installed_version()
-    jlog("info", f"jmcomic 版本检查：已装 {installed} / 最新 {latest}")
+    print(f"[JM下载] jmcomic 版本检查：已装 {installed} / 最新 {latest}")
     if installed == latest:
         return latest
-    jlog("info", f"发现新版本 {latest}（当前 {installed}），开始自动更新...")
+    print(f"[JM下载] 发现新版本 {latest}（当前 {installed}），开始自动更新...")
     try:
         p = subprocess.run([_venv_python(), "-m", "pip", "install", "-U", "jmcomic"],
                            capture_output=True, text=True, timeout=600)
         if p.returncode == 0:
             new_v = _installed_version()
-            jlog("info", f"jmcomic 自动更新成功 → {new_v}")
+            print(f"[JM下载] jmcomic 自动更新成功 → {new_v}")
             return new_v
-        jlog("error", f"jmcomic 自动更新失败: {(p.stderr or p.stdout)[-500:]}")
+        print(f"[JM下载] jmcomic 自动更新失败: {(p.stderr or p.stdout)[-500:]}")
         return None
     except Exception as e:
-        jlog("error", f"jmcomic 自动更新异常: {e}")
+        print(f"[JM下载] jmcomic 自动更新异常: {e}")
         return None
 
 
@@ -692,7 +689,7 @@ def _auto_update_loop():
         try:
             check_and_update()
         except Exception as e:
-            jlog("error", f"自动更新检查异常: {e}")
+            print(f"[JM下载] 自动更新检查异常: {e}")
         try:
             hours = max(1, int(cfg("update_interval_hours", 24)))
         except (TypeError, ValueError):
@@ -833,4 +830,4 @@ def reload_config():
 if cfg("auto_update", True):
     _auto_thread = threading.Thread(target=_auto_update_loop, daemon=True)
     _auto_thread.start()
-    jlog("info", f"自动更新线程已启动（间隔 {cfg('update_interval_hours', 24)}h）")
+    print(f"[JM下载] 自动更新线程已启动（间隔 {cfg('update_interval_hours', 24)}h）")
