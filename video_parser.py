@@ -54,6 +54,7 @@ DEFAULT_CONFIG = {
     "proxy": "",                      # 代理地址（如 http://127.0.0.1:7890）
     "bili_video_quality": "P_720P",   # B站画质：P_360P/P_480P/P_720P/P_1080P
     "bili_video_codec": "AVC",        # B站编码：AVC/HEVC/AV1
+    "bili_cookie": "",                # B站Cookie(含SESSDATA，绕过412风控)
 }
 
 _CONFIG = {}

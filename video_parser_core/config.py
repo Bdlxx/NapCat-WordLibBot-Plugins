@@ -199,3 +199,10 @@ class PluginConfig:
                 self.parser.bilibili.video_codec_list = [str(data["bili_video_codec"])]
         except Exception:
             pass
+        # B站 Cookie（SESSDATA 等）→ bilibili 解析器（绕过 IP 风控 412）
+        if data.get("bili_cookie"):
+            try:
+                self.parser.bilibili.cookies = str(data["bili_cookie"])
+                self.parser.bilibili.name = "bilibili"
+            except Exception:
+                pass
