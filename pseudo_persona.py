@@ -789,37 +789,70 @@ def handle(event):
     elif not clean_text and images:
         clean_text = msg("check_image", "看看你发了什么图~")
 
-    # 先获取 context（此时还没有当前消息在其中），再记录到历史，避免 AI 收到重复消息
-    context = get_context_for_ai(event)
-    add_to_history(event, "user", text or "[图片]", triggered=triggered, has_image=has_image, user_id=user_id)
-
-    # 从用户消息中提取长期记忆
-    if clean_text and user_id:
-        extract_memory_from_interaction(user_id, clean_text)
-
-    # 传入 user_id 以便在系统提示中包含昵称
+    # 入会话队列后台处理（AI 调用不阻塞主消息循环；同会话 FIFO 串行，
+    # 连续多条消息按到达顺序依次回复，后一条能读到前一条的上下文）
     session_key = get_session_key(event)
-    session_lock = _get_session_lock(session_key)
-    session_lock.acquire()
-    try:
-        response, error = call_ai(clean_text, context, images, user_id=user_id, event=event)
+    _ensure_session_worker(session_key)
+    _session_workers[session_key]["q"].put(
+        (event, text, clean_text, images, user_id, has_image)
+    )
+    return True
 
+# ============ 会话级 AI 后台队列（不阻塞主消息循环） ============
+_session_workers = {}
+_session_workers_lock = threading.Lock()
+
+
+def _ensure_session_worker(session_key):
+    """同会话(FIFO)单 worker：AI 调用在后台线程串行处理，
+    主消息循环不再被同步请求阻塞；连续多条消息按到达顺序处理。"""
+    with _session_workers_lock:
+        if session_key in _session_workers:
+            return _session_workers[session_key]
+        import queue as _queue
+        q = _queue.Queue()
+        def _run():
+            while True:
+                item = q.get()
+                if item is None:
+                    break
+                try:
+                    _process_ai_item(*item)
+                except Exception:
+                    import traceback
+                    traceback.print_exc()
+        t = threading.Thread(target=_run, daemon=True, name=f"pseudo-{session_key[:20]}")
+        _session_workers[session_key] = {"q": q, "t": t}
+        t.start()
+        return _session_workers[session_key]
+
+
+def _process_ai_item(event, text, clean_text, images, user_id, has_image):
+    """worker 内串行处理一条触发消息：取上下文(不含本条) → 记历史 → AI → 回复"""
+    try:
+        # 此刻该会话历史尚未包含本条（触发消息统一在 worker 内按 FIFO 记录）
+        context = get_context_for_ai(event)
+        add_to_history(event, "user", text or "[图片]", triggered=True,
+                       has_image=has_image, user_id=user_id)
+
+        if clean_text and user_id:
+            extract_memory_from_interaction(user_id, clean_text)
+
+        response, error = call_ai(clean_text, context, images, user_id=user_id, event=event)
         if error:
             print(f"[伪人] {error}")
-
         if not response:
             response = msg("no_reply", "唔...我好像有点累了，待会再聊吧~")
 
-        # 后处理：去掉 AI 开头的 meta 确认（如"好的，我明白了..."），仅当整句为确认时删除
+        # 后处理：去 AI 开头的 meta 确认
         response = re.sub(r'^(?:好的[，,].*?[。！]|我知道了[。！]|收到[。！]|明白[了]?[。！])[\s]*', '', response).strip()
-        # 去重：去除完全重复的整行（AI 复读），保留首次出现
-        _seen_lines = []
+        # 去重：去除完全重复的整行
+        _seen = []
         for _line in response.split('\n'):
             _ls = _line.strip()
-            if _ls and _ls not in _seen_lines:
-                _seen_lines.append(_ls)
-        response = '\n'.join(_seen_lines)
-        # 压缩多余空白
+            if _ls and _ls not in _seen:
+                _seen.append(_ls)
+        response = '\n'.join(_seen)
         response = re.sub(r'[ \t]+', ' ', response).strip()
 
         add_to_history(event, "assistant", response, triggered=True, user_id=user_id)
@@ -831,14 +864,14 @@ def handle(event):
                     CONFIG.get("split_delay_min", 1),
                     CONFIG.get("split_delay_max", 3)
                 ))
-            # 将 [@数字] 转为 QQ @ 消息段（变量名勿用 msg，避免遮蔽模块级 msg() 文案函数）
             seg_msg = _build_at_segments(part) if "[@" in part else part
             send_message(event, seg_msg)
             print(f"[伪人] 发送: {part}")
-    finally:
-        session_lock.release()
+    except Exception as e:
+        print(f"[伪人] AI处理异常: {e}")
+        import traceback
+        traceback.print_exc()
 
-    return True
 
 def get_stats():
     stats = {"model": CONFIG.get("current_model", "glm")}
