@@ -829,9 +829,9 @@ def handle(event):
                     CONFIG.get("split_delay_min", 1),
                     CONFIG.get("split_delay_max", 3)
                 ))
-            # 将 [@数字] 转为 QQ @ 消息段
-            msg = _build_at_segments(part) if "[@" in part else part
-            send_message(event, msg)
+            # 将 [@数字] 转为 QQ @ 消息段（变量名勿用 msg，避免遮蔽模块级 msg() 文案函数）
+            seg_msg = _build_at_segments(part) if "[@" in part else part
+            send_message(event, seg_msg)
             print(f"[伪人] 发送: {part}")
     finally:
         session_lock.release()
