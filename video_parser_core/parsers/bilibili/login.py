@@ -26,6 +26,7 @@ class BilibiliLogin:
             logger.warning("哔哩哔哩凭证缺少 SESSDATA, 跳过保存")
             return
 
+        self.credential_file.parent.mkdir(parents=True, exist_ok=True)
         self.credential_file.write_text(
             json.dumps(self._credential.get_cookies(), ensure_ascii=False)
         )
