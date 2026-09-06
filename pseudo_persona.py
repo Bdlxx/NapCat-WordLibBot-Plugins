@@ -201,12 +201,7 @@ CONFIG = {
 
     # 人设
     "default_persona": "",  # 第一层默认人设（留空用内置：你是{bot名}温柔可爱…；可 web 配置覆盖）
-    "persona": """你是依星，一个温柔可爱的女孩子。
-性格：温柔体贴、善解人意、偶尔撒娇卖萌
-风格：用简短句子、语气词（呀呢嘛啦）、颜文字 (◕‿◕)
-像朋友聊天，不要像客服。
-
-看到图片时要自然地评论图片内容，像朋友一样聊天。"""
+    # 注：系统补充指令（群聊伪装规范）已硬编码为 _SYSTEM_SUPPLEMENT_INSTRUCTIONS，不再作为可配置项
 }
 
 def load_config():
@@ -691,11 +686,12 @@ def _build_at_segments(text):
     return segments
 
 def save_config():
-    """保存配置到文件"""
+    """保存配置到文件（系统补充指令 persona 为硬编码，不写入/覆盖配置）"""
     import os
     config_path = os.path.join(os.path.dirname(__file__), "..", "data", "persona_config.json")
+    _out = {k: v for k, v in CONFIG.items() if k != "persona"}
     with open(config_path, "w", encoding="utf-8") as f:
-        json.dump(CONFIG, f, ensure_ascii=False, indent=2)
+        json.dump(_out, f, ensure_ascii=False, indent=2)
 
 # ============ 指令注册表（集中定义，一眼可读）============
 registry = CommandRegistry("伪人")
