@@ -20,7 +20,11 @@ class PluginConfig:
         self.data_dir = Path(data_dir or os.path.join(base, "data"))
         self.cache_dir = Path(config_dir or os.path.join(str(self.data_dir), "parser_cache"))
         self.cache_dir.mkdir(parents=True, exist_ok=True)
-        self.cookie_dir = Path(os.path.join(str(self.data_dir), "parser_cookies"))
+        # 共享 cookie 池：<仓库根>/data/cookies —— 双 bot 共读同一份 cookie，
+        # 一处扫码/配置更新，两个 bot 都生效（抖音等平台 cookie + B站凭证）
+        _repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(
+            os.path.dirname(os.path.abspath(__file__))))))
+        self.cookie_dir = Path(os.path.join(_repo, "data", "cookies"))
         self.cookie_dir.mkdir(parents=True, exist_ok=True)
 
         # 下载

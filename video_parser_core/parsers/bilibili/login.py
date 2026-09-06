@@ -14,7 +14,9 @@ class BilibiliLogin:
     """哔哩哔哩登录类"""
 
     def __init__(self, config: PluginConfig):
-        self.credential_file = config.data_dir / "cookies" / "bilibili_credential.json"
+        # B站凭证存共享 cookie 池（config.cookie_dir = <仓库根>/data/cookies）：
+        # 双 bot 共读同一文件，扫码一次两个 bot 都生效
+        self.credential_file = config.cookie_dir / "bilibili_credential.json"
         self.raw_cookies = config.parser.bilibili.cookies
         self._credential: Credential | None = None
 

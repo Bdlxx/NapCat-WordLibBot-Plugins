@@ -221,6 +221,45 @@ try:
         except Exception as e:
             vlog("error", f"解析核心预初始化失败: {e}")
     threading.Thread(target=_preinit_core, daemon=True).start()
+
+    # B站凭证到期每日提醒（共享 cookie 池：凭证失效 → 提醒主人重新扫码）
+    def _send_master_private(text):
+        try:
+            masters = get_config("MASTER_QQ", [])
+            if not isinstance(masters, list):
+                masters = [masters]
+            for m in masters[:3]:
+                ev = {"post_type": "message", "message_type": "private", "user_id": int(m)}
+                send_message(ev, text)
+        except Exception:
+            pass
+
+    def _bili_expiry_check():
+        import asyncio
+        import time as _time
+        while True:
+            try:
+                from video_parser_core.config import PluginConfig as _PCfg
+                from video_parser_core.parsers.bilibili.login import BilibiliLogin
+                _pcfg = _PCfg()
+                _pcfg.load_from_video_config(os.path.join(DATA_DIR, "video_parser_config.json"))
+                login = BilibiliLogin(_pcfg)
+                if login.credential_file.exists():
+                    _loop = asyncio.new_event_loop()
+                    try:
+                        cred = _loop.run_until_complete(login.credential)
+                        expired = cred is None or not cred.has_sessdata()
+                    finally:
+                        _loop.close()
+                else:
+                    expired = True
+                if expired:
+                    _send_master_private("⚠️ B站登录已失效（共享Cookie池），请发「B站登录」重新扫码，否则B站视频解析会失败")
+            except Exception as e:
+                vlog("debug", f"B站凭证检查异常: {e}")
+            _time.sleep(86400)
+
+    threading.Thread(target=_bili_expiry_check, daemon=True).start()
 except Exception as e:
     vlog("error", f"新解析核心接入失败: {e}")
 
