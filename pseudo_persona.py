@@ -452,9 +452,15 @@ def download_image_as_base64(url):
     return None
 
 def build_system_prompt(user_id=None, event=None, additional_user_ids=None):
-    """构建系统提示：代码默认人设 + 用户人设 + 插件提示词 + 长期记忆，替换 [nick] 为对方昵称"""
-    # 人设动态化：默认人设使用当前机器人名称（依星/羽笙等），不再硬编码
+    """构建系统提示（分层人设）：
+    第一层：默认人设 —— 仅传递核心关键信息（身份/基础风格/图片评论/安全兜底），保障基础运行功能；
+    第二层：自定义人格 —— user_persona / persona 存在时启用，并指示 AI 在此基础上做「深度人格特征判定」，
+            贴合自定义性格/说话习惯/情绪反应演绎角色，增强拟人化；与默认人设冲突处以自定义人格为准。
+    最后统一附加：分段规则 + 长期记忆 + [nick] 昵称替换。
+    """
     bot_display = CONFIG.get("bot_name") or get_bot_name()
+
+    # ===== 第一层：默认人设（保底 · 仅核心信息） =====
     default_persona = f"""你是{bot_display}，一个温柔可爱的女孩子。
 性格：温柔体贴、善解人意、偶尔撒娇卖萌
 风格：用简短句子、语气词（呀呢嘛啦）、颜文字 (◕‿◕)
@@ -462,21 +468,30 @@ def build_system_prompt(user_id=None, event=None, additional_user_ids=None):
 
 看到图片时要自然地评论图片内容，像朋友一样聊天。"""
 
+    # ===== 第二层：自定义人格（增强拟人化 · 深度演绎） =====
+    custom_parts = []
     user_persona = CONFIG.get("user_persona", "")
     plugin_persona = CONFIG.get("persona", "")
-
-    character_parts = [default_persona]
     if user_persona:
-        character_parts.append(user_persona)
-
-    combined = "\n".join(character_parts)
-    # 旧版配置中可能残留硬编码默认人设（"你是依星…温柔可爱…像朋友聊天"），识别并忽略避免重复叠加
+        custom_parts.append(user_persona)
+    # 旧版配置残留的默认人设（"你是依星…温柔可爱…像朋友聊天"）识别并忽略，避免重复叠加
     if plugin_persona and plugin_persona != default_persona:
         _legacy_default = ("一个温柔可爱的女孩子" in plugin_persona and "像朋友聊天" in plugin_persona)
         if not _legacy_default:
-            combined += "\n" + plugin_persona
+            custom_parts.append(plugin_persona)
 
-    # 明确分段回复规则
+    if custom_parts:
+        # 启用自定义人格层：先给基础设定，再要求深度人格判定与演绎
+        combined = default_persona + "\n\n【自定义人格设定】\n" + "\n".join(custom_parts)
+        combined += "\n\n【深度人格演绎指令】\n" \
+            "请以上述「自定义人格设定」为准进行深度人格特征判定与演绎：" \
+            "内化其性格底色、价值取向、说话习惯与情绪反应，作为有血有肉的角色自然交谈；" \
+            "当自定义人格与默认人设中任何描述冲突时，一律以自定义人格为准；" \
+            "若自定义人格中未明确之处，再沿用默认人设的基础风格兜底。"
+    else:
+        combined = default_persona
+
+    # 统一附加：分段规则（保障基础输出格式，不随人设变化）
     combined += "\n\n[消息分段规则]\n如果你要表达多句话，请用 |#|#| 分隔每句话，例如：\n\"今天天气真好呀|#|#|一起出去玩吗~\"\n系统会自动按 |#|#| 拆分发送。一句回复不需要分段。"
 
     # 注入长期记忆
