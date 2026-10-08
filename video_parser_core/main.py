@@ -21,7 +21,7 @@ from .config import PluginConfig
 from .debounce import Debouncer
 from .exception import ParseFallbackError
 from .download import Downloader
-from .parsers import BaseParser
+from .parsers import FAILED_IMPORTS, BaseParser
 from .render import Renderer
 from .sender import MessageSender, _setup_sender, segs_to_cq
 from .utils import extract_json_url
@@ -86,6 +86,9 @@ class ParserPlugin:
         patterns.sort(key=lambda x: -len(x[0]))
         self.key_pattern_list = patterns
         print(f"[解析器] 已启用平台: {'、'.join(enabled_names)}")
+        # 某个平台 import 失败不再拖垮整包，但**不能静默**：这里明确报出来
+        for _mod, _err in sorted(FAILED_IMPORTS.items()):
+            print(f"[解析器] 平台 {_mod} 未能加载（已跳过，其它平台不受影响）: {_err}")
 
     # ---------- 解析入口 ----------
     async def _parse_and_send(self, event: dict, text: str):

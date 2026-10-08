@@ -301,7 +301,18 @@ class CookieJar:
                 )
             )
 
-        cj.save(ignore_discard=True, ignore_expires=True)
+        # Windows 上"文件被占用 / OneDrive 同步中 / 目录只读"都会让这里抛 OSError。
+        # 而本方法会被 13 个解析器的 __init__ 间接调用：一旦异常抛出去，_register_parser
+        # 就中断 —— **该平台之后的所有平台永不注册**，静默到重启（真机踩过）。
+        # 所以：只告警、不抛；内存里的 cookie 仍然有效，下次 save 会再试。
+        try:
+            cj.save(ignore_discard=True, ignore_expires=True)
+        except Exception as e:                       # noqa: BLE001
+            logger.warning(
+                f"保存 cookie 失败（内存中的 cookie 仍然有效，稍后会自动重试）："
+                f"{self.cookie_file} — {type(e).__name__}: {e}"
+            )
+            return
         logger.debug(f"已保存 {len(cj)} 个 Cookie 到 {self.cookie_file}")
 
     def load_from_file(self) -> None:
