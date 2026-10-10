@@ -19,25 +19,74 @@ _container_fn = None
 _send_fn = None
 
 
-def configure(send_fn, container_path_fn):
-    """注入 WS 发送函数和容器路径映射"""
+def configure(send_fn, container_path_fn, react_fn=None):
+    """注入 WS 发送函数、容器路径映射（可选：解析开始回调）"""
     global _send_fn, _container_fn
     _send_fn = send_fn
     _container_fn = container_path_fn
     _setup_sender(send_fn, container_path_fn)
+    if react_fn is not None:
+        configure_react(react_fn)
+
+
+def configure_timeout(seconds):
+    """把宿主配置里的"解析总时长上限"转给核心（慢速 CDN 上必须放宽）"""
+    try:
+        vpm.set_parse_timeout(seconds)
+    except Exception:
+        pass
+
+
+def configure_parallel(connections):
+    """把宿主配置里的"分段下载路数"转给核心（1 = 关闭）"""
+    try:
+        vpm.set_parallel_connections(connections)
+    except Exception:
+        pass
+
+
+def configure_react(react_fn):
+    """注入"解析开始"回调：核心确认命中受支持链接后立即调用（早于下载）"""
+    vpm._setup_react(react_fn)
+
+
+def _is_windows() -> bool:
+    """本机是否 Windows（独立函数便于测试替换）"""
+    return os.name == "nt"
+
+
+def _napcat_cache_root() -> str:
+    """NapCat 图片缓存的「宿主机目录」。
+
+    解析顺序（既保证 Linux 线上行为一字不变，也保证 Windows 落在对的地方）：
+      1. 账号 config.json 的 NAPCAT_CACHE_HOST —— 显式配置，也是兼容层
+         astercore/compat/paths.py 用的同一个键，单一事实来源
+      2. Linux + Docker 时代的老规则（/root/napcat/cache/images 等），
+         但**仅在不跑 Windows 且该目录真实存在时**才采用（线上现状）
+      3. ~/napcat/cache/images —— Windows 原生 NapCat 的默认目录，
+         也是框架启动时会自动建好的目录
+
+    为什么必须区分：Windows 上 "/root/napcat/..." 会被当成本盘根目录，
+    os.makedirs 照样成功，文件实际落在 C:\\root\\napcat\\...；而发送时
+    host_to_container() 会把它映射成 /app/cache/images/...，兼容层再映射成
+    %USERPROFILE%\\napcat\\cache\\images\\... —— 两边不是同一个目录，
+    于是「解析成功、下载成功、就是发不出去」。
+    """
+    from utils.config import get_config
+    explicit = str(get_config("NAPCAT_CACHE_HOST", "") or "").strip()
+    if explicit:
+        return explicit
+    qq = str(get_config("BOT_QQ", 0))
+    legacy = "/root/napcat/cache/images" if qq == "740979632" else (
+        "/root/napcat2/cache/images" if qq == "2551736206" else "")
+    if legacy and not _is_windows() and os.path.isdir(legacy):
+        return legacy
+    return os.path.join(os.path.expanduser("~"), "napcat", "cache", "images")
 
 
 def get_cache_dir():
     """返回核心缓存目录（NapCat 共享目录下）"""
-    from utils.config import get_config
-    qq = str(get_config("BOT_QQ", 0))
-    if qq == "740979632":
-        host = "/root/napcat/cache/images"
-    elif qq == "2551736206":
-        host = "/root/napcat2/cache/images"
-    else:
-        host = os.path.expanduser("~/napcat/cache/images")
-    d = os.path.join(host, "parser_cache")
+    d = os.path.join(_napcat_cache_root(), "parser_cache")
     os.makedirs(d, exist_ok=True)
     return d
 
@@ -75,7 +124,8 @@ def handle_parse(event: dict):
     if not text:
         return 1
     try:
-        result = vpm.handle_event_sync(event, send_fn=_send_fn, container_path_fn=_container_fn)
+        result = vpm.handle_event_sync(event, send_fn=_send_fn, container_path_fn=_container_fn,
+                                       cache_dir=get_cache_dir())
         if result == "fallback":
             return 0  # 新核心解析失败 → 转旧逻辑
         return 2 if result else 1

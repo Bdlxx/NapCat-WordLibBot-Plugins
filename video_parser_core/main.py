@@ -106,6 +106,13 @@ class ParserPlugin:
         if searched is None:
             return False
 
+        # 确认命中受支持链接（即将开始下载/解析）→ 通知宿主（如回表情"已开始"）
+        if _react_fn is not None:
+            try:
+                _react_fn(event)
+            except Exception as _e:
+                print(f"[解析器] 解析开始回调异常: {_e}")
+
         aev = AstrMessageEvent(event, send_fn=self._send_fn)
 
         # 链接防抖：命中视为已处理（防止 fallback 旧逻辑导致双重解析）
@@ -164,6 +171,18 @@ class ParserPlugin:
         return await self._parse_and_send(event, text)
 
 
+# ---------- 解析开始回调（宿主可注入：命中链接、即将开始下载时触发）----------
+# 用途：给触发消息回一个"表情回应"之类的即时反馈（下载/去水印要几秒到几十秒）。
+# 未注入时行为与以前完全一致。
+_react_fn = None
+
+
+def _setup_react(fn):
+    """注入"解析开始"回调：fn(event_dict) —— 在确认命中受支持链接后立即调用"""
+    global _react_fn
+    _react_fn = fn
+
+
 # ---------- 同步入口（供非 asyncio 环境调用）----------
 _plugin_instance = None
 _loop = None
@@ -203,6 +222,31 @@ def get_plugin(send_fn=None, container_path_fn=None, cache_dir=None, video_confi
     return _plugin_instance
 
 
+# 解析+下载+合并+发送 的总时长上限（秒）。
+# ⚠️ 写死 120 的教训（2026-10-10 依星线上）：到 B站 CDN 的单连接速度只有 65 kB/s，
+#    28MB 的 1080p 要 7.4 分钟 → 任何 >7MB 的视频都在**精确 120 秒**报「解析失败」。
+#    宿主通过 set_parse_timeout() 按配置调整（见 video_parser.py 的 parse_timeout）。
+_PARSE_TIMEOUT: int = 120
+
+
+def set_parallel_connections(n) -> None:
+    """按宿主配置设置分段下载并发段数（1 = 关闭；转给下载器）"""
+    from .download import set_parallel_connections as _set
+
+    _set(n)
+
+
+def set_parse_timeout(seconds) -> None:
+    """按宿主配置设置"解析+下载+合并+发送"的总时长上限"""
+    global _PARSE_TIMEOUT
+    try:
+        sec = int(seconds)
+    except (TypeError, ValueError):
+        return
+    if sec >= 10:
+        _PARSE_TIMEOUT = sec
+
+
 def handle_event_sync(event: dict, send_fn=None, container_path_fn=None, cache_dir=None):
     """同步包装：供 video_parser.py 的 handle() 调用。
     返回：True=已消费；False=未匹配；'fallback'=解析失败需转旧逻辑"""
@@ -211,7 +255,13 @@ def handle_event_sync(event: dict, send_fn=None, container_path_fn=None, cache_d
     plugin = get_plugin(send_fn=bound_send, container_path_fn=container_path_fn, cache_dir=cache_dir)
     fut = asyncio.run_coroutine_threadsafe(plugin.handle_event(event), _loop)
     try:
-        return fut.result(timeout=120)
+        return fut.result(timeout=_PARSE_TIMEOUT)
+    except TimeoutError:
+        # 注意：超时**不会**取消后台任务（下载/合并可能仍在继续）——所以现象常常是
+        # "群里先报解析失败，过一会儿视频又发出来了"。这里必须把原因说清楚。
+        print(f"[解析器] 解析超时：{_PARSE_TIMEOUT}s 内未完成"
+              f"（视频过大或到 CDN 的速度过慢；可在插件配置里调大 parse_timeout）")
+        return "fallback"
     except ParseFallbackError as e:
         print(f"[解析器] {e}")
         return "fallback"
