@@ -1,4 +1,7 @@
 # astrbot.core.platform.astr_message_event 兼容层
+import logging
+
+logger = logging.getLogger("parser")
 # AstrMessageEvent 的轻量替代：包装我们的 OneBot 事件，提供 send 能力
 
 
@@ -36,10 +39,14 @@ class AstrMessageEvent:
         return segs
 
     async def send(self, segs: list) -> None:
-        if self._send_fn:
-            ret = self._send_fn(segs)
-            if hasattr(ret, "__await__"):
-                await ret
+        if not self._send_fn:
+            # 曾经这里是静默 return：发送能力未注入时"解析成功但群里什么都没有"，
+            # 排查极费时。现在明确报警。
+            logger.error("发送能力未注入(_send_fn=None)，已丢弃 %d 个消息段", len(segs or []))
+            return
+        ret = self._send_fn(segs)
+        if hasattr(ret, "__await__"):
+            await ret
 
     def __repr__(self):
         return f"AstrMessageEvent({self.event.get('message_type')})"

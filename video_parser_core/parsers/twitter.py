@@ -75,6 +75,7 @@ class TwitterParser(BaseParser):
             tweet_id = m.group(1)
         author_name = None
         display_name = None
+        avatar_url = None
         title = None
         if tweet_id:
             try:
@@ -82,6 +83,7 @@ class TwitterParser(BaseParser):
                 if info:
                     author_name = info.get("author")  # 账号 screen_name
                     display_name = info.get("display_name")  # 显示名（用户名）
+                    avatar_url = info.get("avatar_url")  # 头像
                     title = info.get("text")  # 正文
             except Exception:
                 pass
@@ -90,12 +92,13 @@ class TwitterParser(BaseParser):
             html_content,
             author_name=author_name,
             display_name=display_name,
+            avatar_url=avatar_url,
             title=title,
         )
 
     async def _fetch_tweet_info(self, tweet_id: str) -> dict[str, Any] | None:
-        """获取推文信息：fxtwitter 优先（账号+显示名+正文），oEmbed 兜底（账号+显示名）"""
-        # 1. fxtwitter（信息全：账号 + 显示名 + 正文）
+        """获取推文信息：fxtwitter 优先（账号+显示名+头像+正文），oEmbed 兜底（账号+显示名）"""
+        # 1. fxtwitter（信息全：账号 + 显示名 + 头像 + 正文）
         try:
             async with self.session.get(
                 f"https://api.fxtwitter.com/status/{tweet_id}",
@@ -110,6 +113,7 @@ class TwitterParser(BaseParser):
                         return {
                             "author": author.get("screen_name"),
                             "display_name": author.get("name") or "",
+                            "avatar_url": author.get("avatar_url") or "",
                             "text": (tw.get("text") or "")[:300],
                         }
         except Exception:
@@ -130,6 +134,7 @@ class TwitterParser(BaseParser):
                         return {
                             "author": handle,
                             "display_name": j.get("author_name") or "",
+                            "avatar_url": "",
                             "text": "",
                         }
         except Exception:
@@ -141,6 +146,7 @@ class TwitterParser(BaseParser):
         html_content: str,
         author_name: str | None = None,
         display_name: str | None = None,
+        avatar_url: str | None = None,
         title: str | None = None,
     ) -> ParseResult:
         """解析 Twitter HTML 内容
@@ -149,6 +155,7 @@ class TwitterParser(BaseParser):
             html_content (str): Twitter HTML 内容（xdown 返回，含媒体下载链接）
             author_name (str | None): 作者账号 screen_name（fxtwitter/oEmbed 补充）
             display_name (str | None): 作者显示名/用户名（fxtwitter/oEmbed 补充）
+            avatar_url (str | None): 作者头像 URL（fxtwitter 补充）
             title (str | None): 推文正文（fxtwitter 补充）
 
         Returns:
@@ -211,9 +218,12 @@ class TwitterParser(BaseParser):
 
         return self.result(
             title=title,
-            # name=账号(screen_name) 用于外显 @账号；description 存显示名/用户名
+            # name=账号(screen_name) 用于外显 @账号；description 存显示名/用户名；
+            # avatar_url 头像（帖子信息节点点开可见）
             author=self.create_author(
-                author_name or "无用户名", description=display_name or None
+                author_name or "无用户名",
+                avatar_url=avatar_url,
+                description=display_name or None,
             ),
             contents=contents,
         )

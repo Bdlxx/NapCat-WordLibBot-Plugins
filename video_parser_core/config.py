@@ -22,8 +22,11 @@ class PluginConfig:
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         # 共享 cookie 池：<仓库根>/data/cookies —— 双 bot 共读同一份 cookie，
         # 一处扫码/配置更新，两个 bot 都生效（抖音等平台 cookie + B站凭证）
-        _repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(
-            os.path.dirname(os.path.abspath(__file__))))))
+        # 仓库根：优先用显式环境变量（Windows 版把插件放在 <基准目录>/plugins 下时，
+        # 5 层 dirname 会推到安装目录的**上一级**，可能直接写 C:\data 或 Program Files
+        # 之外的地方甚至失败）；未设置时按原有 5 层 dirname 推算 —— Linux 线上行为不变
+        _repo = os.environ.get("ASTERCORE_HOME") or os.path.dirname(os.path.dirname(
+            os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))))
         self.cookie_dir = Path(os.path.join(_repo, "data", "cookies"))
         self.cookie_dir.mkdir(parents=True, exist_ok=True)
 

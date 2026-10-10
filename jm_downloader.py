@@ -18,6 +18,213 @@ __plugin_name_en__ = "jm_downloader"
 __plugin_version__ = "1.0.0"
 __plugin_desc__ = "jm命令下载禁漫本子并转PDF分享，自动更新jmcomic库"
 __plugin_author__ = "NapCat-WordLibBot"
+
+# ============================================================================
+# 可配置项声明（面板据此**自动生成表单**，见 web/config_schema.py）
+#   · 字段名 → 控件类型；path 是值在配置文件里的位置（settings.foo / commands.bar）
+#   · label/help/group 是面板上直接显示的中文；advanced 折叠进「高级选项」
+#   · 纯元数据，不改变插件任何行为；未声明的插件面板会按当前值自动推断
+# ============================================================================
+
+__config_schema__ = {
+    # ---------------- 指令关键词（commands.*）----------------
+    "cmd_download": {
+        "type": "text", "label": "下载本子", "group": "指令",
+        "path": "commands.download", "default": "jm",
+        "help": "触发词：前缀匹配，后面必须跟数字/本子 ID（如「jm 123456」「jm 123 p456」）",
+    },
+    "cmd_detail": {
+        "type": "text", "label": "查看本子详情", "group": "指令",
+        "path": "commands.detail", "default": "jm详情",
+        "help": "触发词：前缀匹配，仅查看元信息不下载（如「jm详情 123456」）",
+    },
+    "cmd_enable": {
+        "type": "text", "label": "开启JM下载", "group": "指令",
+        "path": "commands.enable", "default": "开启jm下载",
+        "help": "触发词：后缀匹配，仅主人可用；群内=开本群，私聊=开全局",
+    },
+    "cmd_disable": {
+        "type": "text", "label": "关闭JM下载", "group": "指令",
+        "path": "commands.disable", "default": "关闭jm下载",
+        "help": "触发词：后缀匹配，仅主人可用；群内=关本群，私聊=关全局",
+    },
+
+    # ---------------- 参数（settings.*）----------------
+    "setting_enabled": {
+        "type": "bool", "label": "插件总开关", "group": "参数",
+        "path": "settings.enabled",
+        "help": "全局总开关，关闭后所有群都不再响应（分群开关见「群组管理」）",
+        "default": True,
+    },
+    "setting_send_pdf": {
+        "type": "bool", "label": "发送 PDF", "group": "参数",
+        "path": "settings.send_pdf",
+        "help": "下载完成后把本子转成 PDF 发给群",
+        "default": True,
+    },
+    "setting_delete_after_send": {
+        "type": "bool", "label": "发送后清理文件", "group": "参数",
+        "path": "settings.delete_after_send",
+        "help": "发送成功后删除本地下载的图片/PDF",
+        "default": True,
+    },
+    "setting_auto_update": {
+        "type": "bool", "label": "自动更新 jmcomic", "group": "参数",
+        "path": "settings.auto_update",
+        "help": "后台定时检查并升级实例 venv 里的 jmcomic 库",
+        "default": True,
+    },
+    "setting_recall_enabled": {
+        "type": "bool", "label": "消息自动撤回", "group": "参数",
+        "path": "settings.recall_enabled",
+        "help": "开启后本插件发出的消息按下面的时间自动撤回（需 NapCat HTTP 可用）",
+        "default": True,
+    },
+    "setting_recall_notice": {
+        "type": "bool", "label": "撤回前提醒", "group": "参数",
+        "path": "settings.recall_notice",
+        "help": "是否先发一条「将在 N 秒后撤回」的前置提醒",
+        "default": True,
+    },
+    "setting_recall_prefix_seconds": {
+        "type": "number", "label": "前置消息撤回时间", "group": "参数",
+        "path": "settings.recall_prefix_seconds", "min": 5, "max": 3600, "step": 1, "unit": "秒",
+        "help": "查询/进度等前置消息的撤回延时",
+        "default": 30,
+    },
+    "setting_recall_pdf_seconds": {
+        "type": "number", "label": "PDF 提醒撤回时间", "group": "参数",
+        "path": "settings.recall_pdf_seconds", "min": 5, "max": 3600, "step": 1, "unit": "秒",
+        "help": "「PDF 已发送」这类提醒消息的撤回延时",
+        "default": 60,
+    },
+    "setting_recall_file_seconds": {
+        "type": "number", "label": "PDF 文件撤回时间", "group": "参数",
+        "path": "settings.recall_file_seconds", "min": 5, "max": 86400, "step": 5, "unit": "秒",
+        "help": "PDF 文件消息的撤回延时（上传耗时较长，通常比提醒宽松）",
+        "default": 300,
+    },
+    "setting_debounce_seconds": {
+        "type": "number", "label": "下载防抖间隔", "group": "参数",
+        "path": "settings.debounce_seconds", "min": 0, "max": 3600, "step": 1, "unit": "秒",
+        "help": "同会话相同链接/本子 ID 在该时间内不重复响应，0=关闭防抖",
+        "default": 30,
+    },
+    "setting_update_interval_hours": {
+        "type": "number", "label": "更新检查间隔", "group": "参数", "advanced": True,
+        "path": "settings.update_interval_hours", "min": 1, "max": 720, "step": 1, "unit": "小时",
+        "help": "自动更新 jmcomic 的检查周期",
+        "default": 24,
+    },
+    "setting_task_timeout_seconds": {
+        "type": "number", "label": "任务超时", "group": "参数", "advanced": True,
+        "path": "settings.task_timeout_seconds", "min": 60, "max": 86400, "step": 60, "unit": "秒",
+        "help": "单次下载子进程的最长存活时间，超时会被杀掉",
+        "default": 1800,
+    },
+    "setting_cleanup_delay_seconds": {
+        "type": "number", "label": "清理延时", "group": "参数", "advanced": True,
+        "path": "settings.cleanup_delay_seconds", "min": 0, "max": 7200, "step": 10, "unit": "秒",
+        "help": "发送文件后延迟多久再删除本地文件（NapCat 是异步读文件，不能立即删；Windows 建议加大）",
+        "default": 600,
+    },
+    "setting_concurrent_image": {
+        "type": "number", "label": "并发下载图片数", "group": "参数", "advanced": True,
+        "path": "settings.concurrent_image", "min": 1, "max": 100, "step": 1, "unit": "线程",
+        "help": "传给 jmcomic 的单章节内图片并发数，过大易被站点限流",
+        "default": 20,
+    },
+    "setting_concurrent_photo": {
+        "type": "number", "label": "并发下载章节数", "group": "参数", "advanced": True,
+        "path": "settings.concurrent_photo", "min": 1, "max": 100, "step": 1, "unit": "线程",
+        "help": "同时下载的章节数",
+        "default": 4,
+    },
+    "setting_download_dir": {
+        "type": "text", "label": "下载目录", "group": "参数", "advanced": True,
+        "path": "settings.download_dir",
+        "help": "相对实例 data/ 的图片下载目录名（PDF 生成后临时放在 data/jm_pdf/）",
+        "default": "jm_downloads",
+    },
+    "setting_recall_seconds": {
+        "type": "number", "label": "前置消息撤回时间（兜底）", "group": "参数", "advanced": True,
+        "path": "settings.recall_seconds", "min": 5, "max": 3600, "step": 1, "unit": "秒",
+        "help": "仅在 recall_prefix_seconds 缺失时作为兜底；正常配置下不生效",
+        "default": 30,
+    },
+
+    # ---------------- 回复模板（messages.*）----------------
+    "msg_usage": {
+        "type": "textarea", "label": "用法提示", "group": "回复模板",
+        "path": "messages.usage", "rows": 5,
+        "help": "只发「jm」不带 ID 时显示；无占位符，支持换行",
+        "default": "📖 用法：\njm <本子id> 下载整个本子，例：jm 123456\njm 123 456 多本下载\njm 123 p456 只下载某章节\njm详情 123456 查看本子信息（不下载）",
+    },
+    "msg_busy": {
+        "type": "text", "label": "任务进行中", "group": "回复模板",
+        "path": "messages.busy", "help": "同一群已有任务时的提示；无占位符",
+        "default": "⏳ 本群已有 JM 下载任务进行中，请稍后再试",
+    },
+    "msg_querying": {
+        "type": "text", "label": "查询中", "group": "回复模板",
+        "path": "messages.querying",
+        "help": "占位符：{ids} 本次要处理的 ID 列表（花括号写法，勿改成方括号）",
+        "default": "⏳ 正在查询 JM {ids} 的详情...",
+    },
+    "msg_no_pdf": {
+        "type": "text", "label": "未生成 PDF", "group": "回复模板",
+        "path": "messages.no_pdf", "help": "无占位符",
+        "default": "⚠️ 下载完成但未生成 PDF 文件",
+    },
+    "msg_send_fail": {
+        "type": "text", "label": "PDF 发送失败", "group": "回复模板",
+        "path": "messages.send_fail",
+        "help": "无占位符（插件会在其后自动追加一行本地文件路径）",
+        "default": "⚠️ PDF 发送失败：无法复制到发送缓存目录",
+    },
+    "msg_fail": {
+        "type": "text", "label": "下载失败", "group": "回复模板",
+        "path": "messages.fail", "help": "占位符：{err} 失败原因",
+        "default": "❌ JM 下载失败：{err}",
+    },
+    "msg_timeout": {
+        "type": "text", "label": "下载超时", "group": "回复模板",
+        "path": "messages.timeout", "help": "无占位符",
+        "default": "⏰ 下载超时已终止，请稍后重试",
+    },
+    "msg_pdf_header": {
+        "type": "textarea", "label": "PDF 分享说明", "group": "回复模板",
+        "path": "messages.pdf_header", "rows": 3,
+        "help": "占位符：{titles} 本子标题（顿号连接）；支持换行",
+        "default": "📚 《{titles}》PDF 分享：\n文件较大，发送需要一点时间，请稍候…",
+    },
+    "msg_detail_header": {
+        "type": "textarea", "label": "本子详情模板", "group": "回复模板",
+        "path": "messages.detail_header", "rows": 7,
+        "help": "占位符：{title} {album_id} {authors} {episodes} {pages} {tags} {update_date}；支持换行",
+        "default": "📖 《{title}》\n🆔 JM{album_id}\n✍️ 作者：{authors}\n📄 章节数：{episodes}{pages}\n🏷️ 标签：{tags}\n🕒 更新：{update_date}",
+    },
+    "msg_recall_notice": {
+        "type": "text", "label": "撤回提醒", "group": "回复模板",
+        "path": "messages.recall_notice",
+        "help": "占位符：{prefix} 前置消息撤回秒数、{pdf} PDF 提醒撤回秒数",
+        "default": "🔇 本次 JM 下载的前置消息将在 {prefix} 秒后自动撤回，PDF 文件将在 {pdf} 秒后撤回",
+    },
+    "msg_recall_pdf_notice": {
+        "type": "text", "label": "PDF 撤回提醒", "group": "回复模板",
+        "path": "messages.recall_pdf_notice", "help": "占位符：{seconds} 秒后撤回",
+        "default": "📄 PDF 已发送完成，将在 {seconds} 秒后自动撤回",
+    },
+
+    # ---------------- 元数据（自动生成/只读）----------------
+    "command_labels": {
+        "type": "json", "label": "指令标签映射", "group": "其它",
+        "path": "command_labels", "advanced": True, "readonly": True, "rows": 6,
+        "help": "插件启动时自动写入的「触发词 → 指令中文名」映射（含未暴露为配置的「jm更新」），只读",
+        "default": {"jm": "下载本子", "开启jm下载": "开启JM下载", "关闭jm下载": "关闭JM下载", "jm更新": "手动更新jmcomic", "jm详情": "查看本子详情"},
+    },
+}
+
 # ===========================================
 
 import json
@@ -161,11 +368,35 @@ def is_master(user_id):
 
 # ========== 子进程环境 ==========
 def _venv_python():
-    """优先使用项目 venv 的 python（jmcomic 装在里面）"""
-    cand = os.path.join(BASE_DIR, "venv", "bin", "python")
-    if os.path.exists(cand):
-        return cand
+    """JM 子进程要用的解释器（jmcomic 装在实例 venv 里）。
+
+    探测顺序（两个平台都能命中，Linux 行为一字不变）：
+      1. <实例>/venv/Scripts/python.exe  —— Windows venv 的真实位置
+      2. <实例>/venv/bin/python          —— Linux venv；也是兼容层为 Windows 放的副本
+      3. <实例>/venv/bin/python.exe      —— 兼容层放的 Windows 副本
+    都没有才退回 sys.executable。但**冻结运行（PyInstaller）时禁止退回**：
+    那时 sys.executable 是主程序自己，拿它跑 `-c` / `-m pip` 等于用本程序的参数集
+    再启动一份自己（会莫名多开一个启动器/面板）。宁可不下载，也不能自我重启。
+    """
+    for rel in (("venv", "Scripts", "python.exe"),
+                ("venv", "bin", "python"),
+                ("venv", "bin", "python.exe")):
+        cand = os.path.join(BASE_DIR, *rel)
+        if os.path.exists(cand):
+            return cand
+    if getattr(sys, "frozen", False):
+        return None
     return sys.executable
+
+
+def _venv_python_or_raise():
+    """拿到解释器，拿不到就给一句人能看懂的话（而不是莫名其妙的多开一个窗口）"""
+    py = _venv_python()
+    if not py:
+        raise RuntimeError(
+            "找不到可用的 Python 解释器：请在 <实例目录>/venv 里装好 jmcomic"
+            "（冻结版不会拿主程序自身当解释器）")
+    return py
 
 
 def _worker_path():
@@ -382,7 +613,7 @@ def _run_task(event, ids, detail_only):
         mode = "photo" if any("p" in i.lower() for i in ids) else "album"
         _write_option(yml_path, dl_dir, pdf_dir, mode)
 
-        cmd_list = [_venv_python(), _worker_path(),
+        cmd_list = [_venv_python_or_raise(), _worker_path(),
                     "--option", yml_path, "--result", result_path,
                     "--ids"] + ids
         if detail_only:
@@ -495,10 +726,48 @@ def _progress_to_text(data):
 
 
 # ========== PDF 发送 ==========
+def _is_windows() -> bool:
+    """本机是否 Windows（独立函数便于测试替换）"""
+    return os.name == "nt"
+
+
+def _send_path(*parts):
+    """拼接「发给 NapCat 的路径」。
+
+    Linux+Docker：发的是**容器内路径**（固定用 '/' 拼，不能用 os.path.join ——
+    在 Windows 上会拼出 "/app/cache/images\\jm_pdf\\x.pdf" 这种混合分隔符）。
+    Windows 原生 NapCat：没有容器，发的是**本机路径**，用 os.path.join 得到原生分隔符。
+    """
+    if _is_windows():
+        return os.path.join(*parts)
+    return "/".join(str(p).rstrip("/") for p in parts)
+
+
 def _napcat_shared_candidates():
-    """候选的 NapCat 宿主机共享目录（逐个尝试，写不进去就换下一个）"""
+    """候选的 NapCat 共享目录：[(宿主机写入目录, 发给 NapCat 的路径前缀), ...]
+
+    两个元素的含义在两个平台上是不同的：
+      · Linux + Docker：NapCat 在容器里，插件写宿主机目录、发 /app/cache/images/…
+        —— 两种路径**不一样**，靠映射对上。
+      · Windows 原生 NapCat：没有容器，NapCat 读的就是本机路径 —— 两种路径
+        **必须相同**。发 /app/cache/images/… 给它等于给它一个不存在的路径。
+    """
     qq = str(get_config("BOT_QQ", 0))
+    local = os.path.expanduser("~/napcat/cache/images")
+    # 显式配置优先（与 astercore/compat/paths.py 用的是同一个键）
+    explicit = str(get_config("NAPCAT_CACHE_HOST", "") or "").strip()
+    # Windows：本机路径即发送路径（PDF 走 HTTP 直发，不经过框架的出口映射，
+    # 所以这里必须一步到位给出 NapCat 真正能读到的路径）
+    if _is_windows():
+        root = explicit or local
+        return [(root, root)]
     cands = []
+    if explicit:
+        cands.append((explicit, "/app/cache/images"))
+    # Linux+Docker 时代的老路径：**只在非 Windows 上尝试**。
+    # 原因：Windows 上 "/root/napcat/..." 会被当成本盘根目录，os.makedirs 与写
+    # 探针文件都会"成功"（普通用户可以在 C:\ 下建目录），于是"写不进去就换下一个"
+    # 的探测被绕过 → 选中 C:\root\ 下的错误目录。
     if qq == "740979632":       # 依星
         cands.append(("/root/napcat/cache/images", "/app/cache/images"))
         cands.append(("/root/napcat2/cache/images", "/app/cache/images"))
@@ -506,8 +775,8 @@ def _napcat_shared_candidates():
         cands.append(("/root/napcat2/cache/images", "/app/cache/images"))
         cands.append(("/root/napcat/cache/images", "/app/cache/images"))
     else:
-        cands.append((os.path.expanduser("~/napcat/cache/images"), "/app/cache/images"))
-    cands.append((os.path.expanduser("~/napcat/cache/images"), "/app/cache/images"))
+        cands.append((local, "/app/cache/images"))
+    cands.append((local, "/app/cache/images"))
     # 去重
     seen = set()
     uniq = []
@@ -559,7 +828,8 @@ def _send_pdfs(event, result, task_id=None, recall_list=None):
         except Exception as e:
             print(f"[JM下载] 复制PDF失败 {p} -> {dest}: {e}")
             continue
-        container_path = os.path.join(container_root, "jm_pdf", fname)
+        # 拼接「发给 NapCat 的路径」：容器路径固定用 '/'，本机路径用 os.path.join
+        container_path = _send_path(container_root, "jm_pdf", fname)
         sent.append((dest, container_path))
         print(f"[JM下载] PDF已就绪: {p} -> {container_path}")
 
@@ -646,7 +916,7 @@ def _cleanup_task_files(pdfs, sent, task_id):
 # ========== 自动更新 jmcomic 库 ==========
 def _installed_version():
     try:
-        p = subprocess.run([_venv_python(), "-c",
+        p = subprocess.run([_venv_python_or_raise(), "-c",
                             "import jmcomic; print(jmcomic.__version__)"],
                            capture_output=True, text=True, timeout=30)
         v = (p.stdout or "").strip()
@@ -669,7 +939,7 @@ def check_and_update():
         return latest
     print(f"[JM下载] 发现新版本 {latest}（当前 {installed}），开始自动更新...")
     try:
-        p = subprocess.run([_venv_python(), "-m", "pip", "install", "-U", "jmcomic"],
+        p = subprocess.run([_venv_python_or_raise(), "-m", "pip", "install", "-U", "jmcomic"],
                            capture_output=True, text=True, timeout=600)
         if p.returncode == 0:
             new_v = _installed_version()
