@@ -92,7 +92,22 @@ def get_cache_dir():
 
 
 def host_to_container(path: str) -> str:
-    """宿主机路径 → NapCat 容器内路径"""
+    """宿主机路径 → NapCat 容器内路径
+
+    先按**本实例解析出的**缓存目录映射一次（NAPCAT_CACHE_HOST 优先）。
+    老实例映射结果与下面写死的两条完全一致（依星 /root/napcat、羽笙 /root/napcat2），
+    但新实例（如 /root/napcat3）**不能**再加一条写死分支 —— 否则解析核心写盘的
+    宿主机目录与发给 NapCat 的容器路径对不上，表现就是「解析成功、下载成功、
+    就是发不出去」（与 Windows 那次同一个坑）。Windows 原生 NapCat 无容器，
+    仍走老逻辑（返回本机路径）。
+    """
+    if not _is_windows():
+        try:
+            root = _napcat_cache_root().rstrip("/")
+            if root and (path == root or path.startswith(root + "/")):
+                return "/app/cache/images" + path[len(root):]
+        except Exception:
+            pass
     for host_root, container_root in (
         ("/root/napcat2/cache/images", "/app/cache/images"),
         ("/root/napcat/cache/images", "/app/cache/images"),

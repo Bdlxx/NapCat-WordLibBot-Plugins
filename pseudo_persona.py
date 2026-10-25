@@ -144,7 +144,7 @@ __config_schema__ = {
     "default_persona": {
         "type": "textarea", "label": "默认人设（第一层）", "group": "人设", "rows": 6,
         "path": "default_persona",
-        "help": "留空使用内置人设；占位符 {依星}/{羽笙}/{bot_display}/{bot_name} 会替换成当前机器人名",
+        "help": "留空使用内置人设；占位符 {bot_name}（兼容旧写法 {依星}/{羽笙}/{bot_display}）会替换成当前机器人名",
         "default": "你是{bot_name}。\n说话自然口语，简短，不要客服腔和书面语。\n看到图片时随口评论内容，像朋友聊天一样。",
     },
     "user_persona": {
