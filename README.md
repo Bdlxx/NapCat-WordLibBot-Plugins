@@ -14,6 +14,7 @@
 | `jm_worker.py` | JM下载工作进程 | 由 jm_downloader 以子进程方式调用，非独立插件（无 handle 函数，不会被主程序加载） |
 | `pseudo_persona.py` | 伪人插件 | AI 对话回复、角色扮演，支持 GLM 和 Gemini 双模型 |
 | `video_parser.py` | 视频解析 | 抖音/B站/快手/小红书/TikTok 视频解析去水印 |
+| `haruka.py` | B站推送 | 移植自 [HarukaBot](https://github.com/SK-415/HarukaBot)：B站 UP 主动态/开播/下播推送到群，支持关注管理、@全体、权限开关 |
 
 ## 插件规范（SDK）
 
