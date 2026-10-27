@@ -602,6 +602,26 @@ def is_master(event):
     master_ids = {int(str(m).strip()) for m in master_list if str(m).strip().isdigit()}
     return user_id in master_ids
 
+
+def _admin_qqs():
+    """全插件通用的管理员（面板「设置」→ 管理员 QQ → config.json 的 ADMIN_QQ）"""
+    try:
+        raw = get_config("ADMIN_QQ", []) or []
+    except Exception:
+        raw = []
+    if not isinstance(raw, (list, tuple, set)):
+        raw = [raw]
+    return {str(x).strip() for x in raw if str(x).strip()}
+
+
+def is_admin(event):
+    return str(event.get("user_id", "")).strip() in _admin_qqs()
+
+
+def is_privileged(event):
+    """主人或管理员（伪人插件没有主人专属指令）"""
+    return is_master(event) or is_admin(event)
+
 def add_to_history(event, role, content, triggered=False, has_image=False, user_id=None):
     key = get_session_key(event)
     if user_id is None:
@@ -1119,8 +1139,8 @@ def handle(event):
         _log('debug', f'过滤自消息: user_id={user_id}')
         return False
 
-    # ===== 主人指令（开关类，注册表统一分发） =====
-    if registry.dispatch(event, text, is_master(event), master_cmds_only=True):
+    # ===== 特权指令（开关类：主人 + 管理员，注册表统一分发） =====
+    if registry.dispatch(event, text, is_privileged(event), master_cmds_only=True):
         return True
 
     if not CONFIG.get("enabled", True):
@@ -1129,8 +1149,8 @@ def handle(event):
     if msg_type == "group" and not _pt_enabled(event.get("group_id"), "pseudo"):
         return False
 
-    # ===== 主人管理指令（模型切换/历史清理，需 @ 机器人触发，注册表统一分发） =====
-    if is_master(event) and is_at_me(event):
+    # ===== 管理指令（模型切换/历史清理：主人 + 管理员，需 @ 机器人触发） =====
+    if is_privileged(event) and is_at_me(event):
         if registry.dispatch(event, text, True):
             return True
 

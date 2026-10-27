@@ -226,11 +226,11 @@ __config_schema__ = {
     },
     "reply_master_only": {
         "type": "text", "label": "仅主人（概率）", "group": "回复模板",
-        "path": "replies.master_only", "default": "只有主人才能设置概率。", "help": "无占位符",
+        "path": "replies.master_only", "default": "只有主人或管理员才能设置概率。", "help": "无占位符",
     },
     "reply_master_only_cd": {
         "type": "text", "label": "仅主人（CD）", "group": "回复模板",
-        "path": "replies.master_only_cd", "default": "只有主人才能设置CD。", "help": "无占位符",
+        "path": "replies.master_only_cd", "default": "只有主人或管理员才能设置CD。", "help": "无占位符",
     },
     "reply_format_prob": {
         "type": "text", "label": "概率格式错误", "group": "回复模板",
@@ -431,7 +431,34 @@ def get_group_members(group_id):
         return []
 
 def is_master(user_id):
-    return user_id in MASTER_QQ
+    """主人（每次实时读 config.json）"""
+    try:
+        ml = get_master_qq() or []
+    except Exception:
+        ml = []
+    if not isinstance(ml, (list, tuple, set)):
+        ml = [ml]
+    return str(user_id) in {str(m).strip() for m in ml}
+
+
+def _admin_qqs():
+    """全插件通用的管理员（面板「设置」→ 管理员 QQ → config.json 的 ADMIN_QQ）"""
+    try:
+        raw = get_config("ADMIN_QQ", []) or []
+    except Exception:
+        raw = []
+    if not isinstance(raw, (list, tuple, set)):
+        raw = [raw]
+    return {str(x).strip() for x in raw if str(x).strip()}
+
+
+def is_admin(user_id):
+    return str(user_id) in _admin_qqs()
+
+
+def is_privileged(user_id):
+    """主人或管理员"""
+    return is_master(user_id) or is_admin(user_id)
 
 def extract_at(event):
     for seg in event.get("message", []):
@@ -607,8 +634,8 @@ def handle_my_object(event):
     return True
 
 def handle_set_prob(event):
-    if not is_master(event.get("user_id")):
-        send_message(event, rep("master_only", "只有主人才能设置概率。"))
+    if not is_privileged(event.get("user_id")):
+        send_message(event, rep("master_only", "只有主人或管理员才能设置概率。"))
         return True
     parts = event.get("raw_message", "").split()
     if len(parts) != 2:
@@ -628,8 +655,8 @@ def handle_set_prob(event):
     return True
 
 def handle_set_cd(event):
-    if not is_master(event.get("user_id")):
-        send_message(event, rep("master_only_cd", "只有主人才能设置CD。"))
+    if not is_privileged(event.get("user_id")):
+        send_message(event, rep("master_only_cd", "只有主人或管理员才能设置CD。"))
         return True
     parts = event.get("raw_message", "").split()
     if len(parts) != 2:
@@ -737,8 +764,8 @@ def handle(event):
     user_id = event.get("user_id")
 
     _l()
-    # 主人指令（开关/设置，注册表统一分发）
-    if registry.dispatch(event, raw_msg, is_master(user_id), master_cmds_only=True):
+    # 特权指令（开关/设置：主人 + 管理员，注册表统一分发）
+    if registry.dispatch(event, raw_msg, is_privileged(user_id), master_cmds_only=True):
         return True
 
     if not setting("enabled", True):
@@ -748,7 +775,7 @@ def handle(event):
         return False
 
     # 玩家指令（娶/嫁/离婚/我的对象，注册表统一分发）
-    if registry.dispatch(event, raw_msg, is_master(user_id)):
+    if registry.dispatch(event, raw_msg, is_privileged(user_id)):
         return True
     return False
 

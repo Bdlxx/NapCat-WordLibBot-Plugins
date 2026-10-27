@@ -394,6 +394,11 @@ def _cmd_disable(event, raw, kw):
 
 def _cmd_bili_login(event, raw, kw):
     """B站扫码登录：生成二维码，手机B站APP扫码后自动保存凭证（绕过412风控）"""
+    # 会覆盖机器人账号的 B站登录凭证 → 主人专属（管理员也不行）
+    if not is_master(event.get("user_id")):
+        send_message(event, "只有主人才能进行 B站扫码登录（会替换机器人账号的登录凭证）")
+        return True
+
     import asyncio
     import threading
 
@@ -662,6 +667,26 @@ def is_master(user_id):
     return str(user_id) in [str(m) for m in ml]
 
 
+def _admin_qqs():
+    """全插件通用的管理员（面板「设置」→ 管理员 QQ → config.json 的 ADMIN_QQ）"""
+    try:
+        raw = get_config("ADMIN_QQ", []) or []
+    except Exception:
+        raw = []
+    if not isinstance(raw, (list, tuple, set)):
+        raw = [raw]
+    return {str(x).strip() for x in raw if str(x).strip()}
+
+
+def is_admin(user_id):
+    return str(user_id) in _admin_qqs()
+
+
+def is_privileged(user_id):
+    """主人或管理员（B站扫码登录仍为主人专属）"""
+    return is_master(user_id) or is_admin(user_id)
+
+
 def handle(event):
     if event.get("post_type") != "message":
         return False
@@ -669,8 +694,8 @@ def handle(event):
     raw = event.get("raw_message", "").strip()
     uid = event.get("user_id", 0)
 
-    # 主人开关指令（注册表统一分发）
-    if registry.dispatch(event, raw, is_master(uid), master_cmds_only=True):
+    # 特权指令（开关/清缓存：主人 + 管理员；B站登录在 handler 里另限主人）
+    if registry.dispatch(event, raw, is_privileged(uid), master_cmds_only=True):
         return True
 
     if not cfg("enabled", True):
