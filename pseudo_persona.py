@@ -274,6 +274,46 @@ __config_schema__ = {
         "default": "看看你发了什么图~",
     },
 
+    # ---------------- 表情包 ----------------
+    "sticker_enabled": {
+        "type": "bool", "label": "启用表情包", "group": "表情包",
+        "path": "sticker_enabled",
+        "help": "开启后提示词里会注入「[表情包权限=真]」和标签清单，AI 可输出 [表情:标签]；库在 data/stickers/（stickers.json 与 <标签>/ 同目录）",
+        "default": True,
+    },
+    "sticker_max_per_reply": {
+        "type": "number", "label": "每条最多表情数", "group": "表情包",
+        "path": "sticker_max_per_reply", "min": 0, "max": 3, "step": 1, "unit": "个",
+        "help": "一次 AI 回复最多允许几个表情包（0=等同关闭）；超出的 token 直接丢弃",
+        "default": 1,
+    },
+    "sticker_cooldown_sec": {
+        "type": "number", "label": "同会话表情冷却", "group": "表情包",
+        "path": "sticker_cooldown_sec", "min": 0, "max": 600, "step": 5, "unit": "秒",
+        "help": "同一会话两次发表情的最小间隔，避免连着刷表情；0=不限制",
+        "default": 30,
+    },
+
+    # ---------------- 消息行为 ----------------
+    "auto_recall_pseudo": {
+        "type": "bool", "label": "自动撤回伪人消息", "group": "参数",
+        "path": "auto_recall_pseudo", "advanced": True,
+        "help": "发出后按「撤回延迟」自动撤回（伪人发错话时不易暴露）；需要主程序把 API 回执回调进来",
+        "default": False,
+    },
+    "recall_delay_sec": {
+        "type": "number", "label": "撤回延迟", "group": "参数",
+        "path": "recall_delay_sec", "min": 5, "max": 3600, "step": 5, "unit": "秒", "advanced": True,
+        "help": "开启自动撤回后，消息发出多少秒后撤回",
+        "default": 60,
+    },
+    "error_forward_to_master": {
+        "type": "bool", "label": "失败转发主人", "group": "参数",
+        "path": "error_forward_to_master",
+        "help": "AI 全部模型失败或处理异常时私聊通知主人（只私聊，不发群）；同一会话 5 分钟内最多一条",
+        "default": True,
+    },
+
     # ---------------- 元数据（自动生成/只读）----------------
     "command_labels": {
         "type": "json", "label": "指令标签映射", "group": "其它",
@@ -297,12 +337,202 @@ import random
 import requests
 import base64
 import threading
-from utils.api import send_message
+from utils.api import send_message, ws_send, ws_delete_msg
 from utils.config import get_config, get_bot_name
 from utils.plugin_toggle import is_enabled as _pt_enabled, set_enabled as _pt_set
 from utils.command_registry import CommandRegistry
 from utils.log import log as _log
 import os
+
+# ============ 表情包（本地库 → [表情:标签]，daemon 无关，纯插件内） ============
+_STICKER_DIR = os.path.join(os.path.dirname(__file__), "..", "data", "stickers")
+_STICKER_INDEX = os.path.join(_STICKER_DIR, "stickers.json")   # 索引跟图放在一起，目录自成一体
+_STICKER_MAX_KB = 400          # 单张上限：base64 帧别太大（1.37 倍膨胀）
+_sticker_tags = {}             # 标签 -> [绝对路径]
+_sticker_mtime = 0
+_sticker_lock = threading.Lock()
+_sticker_state = {}            # 会话 -> {"last": 时间戳, "recent": [路径...]}
+
+
+def _load_stickers(force=False):
+    """读 data/stickers.json（{"tags": {标签: [相对路径]}}）；按 mtime 热更新，失败则视为空库"""
+    global _sticker_tags, _sticker_mtime
+    try:
+        mtime = os.path.getmtime(_STICKER_INDEX)
+    except Exception:
+        _sticker_tags, _sticker_mtime = {}, 0
+        return _sticker_tags
+    if not force and mtime == _sticker_mtime:
+        return _sticker_tags
+    tags = {}
+    try:
+        with open(_STICKER_INDEX, "r", encoding="utf-8") as f:
+            raw = json.load(f)
+        for tag, files in (raw.get("tags") or {}).items():
+            good = []
+            for rel in files or []:
+                p = os.path.join(_STICKER_DIR, rel)
+                try:
+                    if os.path.isfile(p) and os.path.getsize(p) <= _STICKER_MAX_KB * 1024:
+                        good.append(p)
+                except Exception:
+                    continue
+            if good:
+                tags[str(tag)] = good
+    except Exception as e:
+        print(f"[伪人] 表情库读取失败: {e}")
+        return _sticker_tags
+    _sticker_tags, _sticker_mtime = tags, mtime
+    print(f"[伪人] 表情库就绪: {len(tags)} 个标签 / {sum(len(v) for v in tags.values())} 张")
+    return tags
+
+
+def _sticker_pick(tag, session_key):
+    """按标签随机抽一张；同会话冷却期内直接放弃（返回 None），最近用过的排后面"""
+    files = (_load_stickers() or {}).get(tag) or []
+    if not files:
+        print(f"[伪人] 表情标签不存在: {tag}")
+        return None
+    with _sticker_lock:
+        st = _sticker_state.setdefault(session_key, {"last": 0.0, "recent": []})
+        cool = float(CONFIG.get("sticker_cooldown_sec", 30) or 0)
+        if cool > 0 and (time.time() - float(st.get("last") or 0)) < cool:
+            print(f"[伪人] 表情冷却中，跳过: {tag}")
+            return None
+        recent = st.get("recent") or []
+        pool = [p for p in files if p not in recent] or list(files)
+        pick = random.choice(pool)
+        st["last"] = time.time()
+        keep = max(1, len(files) - 1)
+        st["recent"] = (recent + [pick])[-keep:]
+    return pick
+
+
+def _sticker_segment(path):
+    """图片消息段（sub_type=1 表示表情/动画表情）；走 base64:// 免去宿主机→容器路径映射"""
+    try:
+        if os.path.getsize(path) > _STICKER_MAX_KB * 1024:
+            print(f"[伪人] 表情过大，跳过: {path}")
+            return None
+        with open(path, "rb") as f:
+            b64 = base64.b64encode(f.read()).decode()
+        return {"type": "image", "data": {"file": "base64://" + b64,
+                                          "sub_type": 1, "summary": "[动画表情]"}}
+    except Exception as e:
+        print(f"[伪人] 表情编码失败: {e}")
+        return None
+
+
+def _sticker_prompt():
+    """表情包能力的提示词片段；关掉或库为空时只给"无权限"旗标"""
+    off = "[表情包权限=假]\n（你当前没有发表情包的能力，不要输出任何 [表情:…] 语法。）"
+    if not CONFIG.get("sticker_enabled", True):
+        return off
+    maxn = int(CONFIG.get("sticker_max_per_reply", 1) or 0)
+    tags = [t for t, v in (_load_stickers() or {}).items() if v]
+    if maxn <= 0 or not tags:
+        return off
+    return (
+        "[表情包权限=真]\n"
+        "[表情包标签] " + "、".join(tags) + "\n"
+        "[表情包发送规范]\n"
+        "想发表情时，在句末单独写一个 [表情:标签]，标签只能从上表里选；一次回复最多 %d 个。\n"
+        "表情必须贴合这句话的情绪；拿不准就不发。别人在问正事、你刚发过、或这句话是认真安慰/道歉时，不要发。\n"
+        "不要把 [表情:…] 塞进括号、引号或句号里，也不要解释这个语法。" % maxn
+    )
+
+
+def _build_segments(text, session_key="", budget=None):
+    """把文本拆成消息段：[@QQ] → at 段，[表情:标签] → image 段（表情），其余为文本。
+
+    永远返回段数组：NapCat 只对**字符串** message 做 CQ 码解析，发数组等于顺手
+    堵掉"AI 或群友诱导输出 [CQ:...] 直接生效"的注入面。
+    """
+    if budget is None:
+        budget = {"left": int(CONFIG.get("sticker_max_per_reply", 1) or 0)}
+    segs, last = [], 0
+    for m in _TOKEN_RE.finditer(text):
+        if m.start() > last:
+            segs.append({"type": "text", "data": {"text": text[last:m.start()]}})
+        if m.group(1):
+            segs.append({"type": "at", "data": {"qq": int(m.group(1))}})
+        else:
+            tag = (m.group(2) or "").strip()
+            seg = None
+            if budget.get("left", 0) > 0:
+                path = _sticker_pick(tag, session_key)
+                if path:
+                    seg = _sticker_segment(path)
+            if seg:
+                segs.append(seg)
+                budget["left"] = int(budget.get("left", 0)) - 1
+            else:
+                print(f"[伪人] 表情未发送: {tag}")
+        last = m.end()
+    if last < len(text):
+        segs.append({"type": "text", "data": {"text": text[last:]}})
+    keep = [s for s in segs if not (s["type"] == "text" and not (s["data"].get("text") or "").strip())]
+    return keep or [{"type": "text", "data": {"text": text}}]
+
+
+_TOKEN_RE = re.compile(r"\[@(\d+)\]|\[表情\s*[:：]\s*([^\]\s]{1,12})\]")
+
+
+def _send_segments(event, segs):
+    """发一条消息（段数组）；开启自动撤回时抓 message_id 再延迟撤回"""
+    if not bool(CONFIG.get("auto_recall_pseudo", False)):
+        send_message(event, segs)
+        return
+    delay = int(CONFIG.get("recall_delay_sec", 60) or 60)
+
+    def _on_ok(data):
+        try:
+            d = data or {}
+            mid = (d.get("data") or {}).get("message_id") or d.get("message_id")
+            if not mid:
+                return
+
+            def _later():
+                time.sleep(max(5, delay))
+                try:
+                    ws_delete_msg(mid)
+                    print(f"[伪人] 已撤回消息: {mid}")
+                except Exception as e:
+                    print(f"[伪人] 撤回失败: {e}")
+
+            threading.Thread(target=_later, daemon=True).start()
+        except Exception as e:
+            print(f"[伪人] 撤回调度失败: {e}")
+
+    ws_send(event, segs, on_ok=_on_ok)
+
+
+_fail_notice = {}              # 会话 -> 上次通知时间戳
+_fail_notice_lock = threading.Lock()
+
+
+def _notify_master(text, key=""):
+    """把失败信息私聊转发主人（绝不发群里）；同一会话 5 分钟最多一条"""
+    if not CONFIG.get("error_forward_to_master", True):
+        return
+    now = time.time()
+    with _fail_notice_lock:
+        if now - float(_fail_notice.get(key) or 0) < 300:
+            return
+        _fail_notice[key] = now
+    try:
+        from utils.config import get_master_qq
+        qqs = get_master_qq() or []
+        if not isinstance(qqs, (list, tuple, set)):
+            qqs = [qqs]
+        for qq in qqs:
+            try:
+                send_message({"message_type": "private", "user_id": int(qq)}, f"[伪人] {text}")
+            except Exception as e:
+                print(f"[伪人] 转发主人失败: {e}")
+    except Exception:
+        pass
+
 
 # ============ 昵称系统（带缓存）============
 USER_DATA_FILE = os.path.join(os.path.dirname(__file__), "..", "data", "user_data.json")
@@ -480,6 +710,16 @@ CONFIG = {
     # 人设
     "default_persona": "",  # 第一层默认人设（留空用内置：你是{bot名}温柔可爱…；可 web 配置覆盖）
     # 注：系统补充指令（群聊伪装规范）已硬编码为 _SYSTEM_SUPPLEMENT_INSTRUCTIONS，不再作为可配置项
+
+    # 表情包（本地库 data/stickers/，AI 用 [表情:标签] 引用）
+    "sticker_enabled": True,
+    "sticker_max_per_reply": 1,
+    "sticker_cooldown_sec": 30,
+
+    # 伪人消息自动撤回 / 失败转发主人
+    "auto_recall_pseudo": False,
+    "recall_delay_sec": 60,
+    "error_forward_to_master": True,
 }
 
 def load_config():
@@ -516,6 +756,10 @@ def reload_config():
     global _own_bot_cache
     _own_bot_cache = None          # 名单可能刚在配置里改过，重新探测
     load_config()
+    try:
+        _load_stickers(force=True)   # 面板改完表情库/开关后立刻生效
+    except Exception:
+        pass
 
 load_config()
 
@@ -834,6 +1078,14 @@ def build_system_prompt(user_id=None, event=None, additional_user_ids=None):
 
     # 统一附加：分段规则（保障基础输出格式，不随人设变化）
     combined += "\n\n[消息分段规则]\n如果你要表达多句话，请用 |#|#| 分隔每句话，例如：\n\"今天天气真好呀|#|#|一起出去玩吗~\"\n系统会自动按 |#|#| 拆分发送。一句回复不需要分段。"
+
+    # 表情包能力（[表情包权限=真/假] + 标签清单 + 发送规范）
+    try:
+        _sp = _sticker_prompt()
+        if _sp:
+            combined += "\n\n" + _sp
+    except Exception:
+        pass
 
     # 注入长期记忆
     user_ids = [user_id]
@@ -1257,6 +1509,7 @@ def _process_ai_item(event, text, clean_text, images, user_id, has_image):
         response, error = call_ai(clean_text, context, images, user_id=user_id, event=event)
         if error:
             print(f"[伪人] {error}")
+            _notify_master(f"AI 调用失败（{get_session_key(event)}）：{error}", key=get_session_key(event))
         if not response:
             response = msg("no_reply", "唔...我好像有点累了，待会再聊吧~")
 
@@ -1274,17 +1527,20 @@ def _process_ai_item(event, text, clean_text, images, user_id, has_image):
         add_to_history(event, "assistant", response, triggered=True, user_id=user_id)
 
         parts = split_msg(response)
+        session_key = get_session_key(event)
+        budget = {"left": int(CONFIG.get("sticker_max_per_reply", 1) or 0)}
         for i, part in enumerate(parts):
             if i > 0:
                 time.sleep(random.uniform(
                     CONFIG.get("split_delay_min", 1),
                     CONFIG.get("split_delay_max", 3)
                 ))
-            seg_msg = _build_at_segments(part) if "[@" in part else part
-            send_message(event, seg_msg)
+            segs = _build_segments(part, session_key, budget)
+            _send_segments(event, segs)
             print(f"[伪人] 发送: {part}")
     except Exception as e:
         print(f"[伪人] AI处理异常: {e}")
+        _notify_master(f"处理异常（{get_session_key(event)}）：{e}", key=get_session_key(event))
         import traceback
         traceback.print_exc()
 
