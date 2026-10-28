@@ -43,8 +43,8 @@ __config_schema__ = {
     },
     "glm_model": {
         "type": "text", "label": "GLM 模型名", "group": "模型与凭证", "advanced": True,
-        "path": "glm.model", "help": "如 glm-4v-flash（带 v 的型号才能识图）",
-        "default": "glm-4v-flash",
+        "path": "glm.model", "help": "中转实际在售的型号（2026-10-28 起 glm-4v-flash 已下架，用 glm-5.3-flash；须支持识图）",
+        "default": "glm-5.3-flash",
     },
     "gemini_api_url": {
         "type": "text", "label": "Gemini 接口地址", "group": "模型与凭证", "advanced": True,
@@ -272,6 +272,13 @@ __config_schema__ = {
         "type": "text", "label": "看图提示", "group": "回复模板",
         "path": "messages.check_image", "help": "只发图片没配文字时的过渡语；无占位符",
         "default": "看看你发了什么图~",
+    },
+
+    "gemini_fallback_models": {
+        "type": "text", "label": "低价备选型号链", "group": "模型与凭证",
+        "path": "gemini_fallback_models",
+        "help": "同一中转/同一把 key 下的备用型号，逗号分隔、按顺序尝试。2026-10-28 实测（allvip 组）：gemini-2.5-flash 0.226 / glm-5.3-flash 0.24 / gemini-3.7-flash 0.469 / gemini-3.8-flash 0.469 可用；gemini-3.5-flash-lite 虽标价 0.24 但该中转报 400/500 不可用；free 组模型本 key 无权",
+        "default": "gemini-2.5-flash, gemini-3.7-flash, glm-5.3-flash",
     },
 
     # ---------------- 表情包 ----------------
@@ -748,6 +755,9 @@ CONFIG = {
     "sticker_max_per_reply": 1,
     "sticker_cooldown_sec": 30,
 
+    # 低价备选型号链（同一个中转/同一把 key，逗号分隔；实测同组可用见 schema help）
+    "gemini_fallback_models": "gemini-2.5-flash, gemini-3.7-flash, glm-5.3-flash",
+
     # 伪人消息自动撤回 / 失败转发主人
     "auto_recall_pseudo": False,
     "recall_delay_sec": 60,
@@ -1140,18 +1150,64 @@ def build_system_prompt(user_id=None, event=None, additional_user_ids=None):
     combined = combined.replace("[nick]", nick or "对方")
     return combined
 
-def call_ai(prompt, context, images, user_id=None, event=None):
-    """调用 AI API，带自动容错切换（主模型超时→备模型→都失败则返回 None）"""
-    global _active_model, _primary_fail_time
-    primary = CONFIG.get("current_model", "glm")
-    backup = _get_backup_model()
+def _parse_model_chain():
+    """低价备选型号（同一条中转、同一个 key），按配置顺序尝试。
 
-    # 决定尝试顺序（线程安全读取当前模型状态）
+    配置 gemini_fallback_models：逗号分隔的模型名，例如
+    "gemini-3.7-flash, glm-5.3-flash"。留空 = 只用原来的两槽位容错。
+    """
+    raw = CONFIG.get("gemini_fallback_models", "")
+    if isinstance(raw, (list, tuple)):
+        names = [str(x).strip() for x in raw]
+    else:
+        names = str(raw or "").replace("，", ",").split(",")
+    return [n.strip() for n in names if n and n.strip()]
+
+
+def _synthetic_target(model_name):
+    """把一个型号名套到 gemini 槽位的 url/key 上（只在内存里，不改配置）"""
+    cfg = dict(CONFIG.get("gemini") or {})
+    cfg["model"] = model_name
+    return cfg
+
+
+def _primary_model_name():
+    primary = CONFIG.get("current_model", "gemini")
+    return ((CONFIG.get(primary) or {}).get("model") or primary).strip()
+
+
+def _targets():
+    """尝试顺序 [(标签=型号名, 模型配置)]：上次成功的 → 主模型 → 低价备选链 → 另一个槽位"""
+    primary = CONFIG.get("current_model", "gemini")
+    backup = "gemini" if primary == "glm" else "glm"
+    out, seen = [], set()
+
+    def add(label, cfg):
+        if not cfg:
+            return
+        name = (cfg.get("model") or label or "").strip()
+        key = (cfg.get("api_key") or "").strip()
+        if not name or not key or name in seen:
+            return
+        seen.add(name)
+        out.append((name, cfg))
+
     with _model_lock:
-        if _active_model and _active_model != primary:
-            targets = [_active_model, primary]
-        else:
-            targets = [primary, backup]
+        active = _active_model
+    if active:
+        add(active, _synthetic_target(active) if active != _primary_model_name() else CONFIG.get(primary))
+    add(_primary_model_name(), CONFIG.get(primary, CONFIG["glm"]))
+    for name in _parse_model_chain():
+        add(name, _synthetic_target(name))
+    add(None, CONFIG.get(backup))
+    return out
+
+
+def call_ai(prompt, context, images, user_id=None, event=None):
+    """调用 AI API，带自动容错：主模型 → 低价备选型号链 → 另一个槽位（都失败返回 None）"""
+    global _active_model, _primary_fail_time
+    primary = CONFIG.get("current_model", "gemini")
+    targets = _targets()
 
     # 收集上下文中的其他用户ID用于记忆
     additional_ids = set()
@@ -1162,9 +1218,8 @@ def call_ai(prompt, context, images, user_id=None, event=None):
                 additional_ids.add(m.group(1))
 
     last_error = None
-    for attempt in targets:
-        model_config = CONFIG.get(attempt, CONFIG["glm"])
-        api_key = model_config.get("api_key", "")
+    for attempt, model_config in targets:
+        api_key = (model_config.get("api_key") or "").strip()
         if not api_key:
             last_error = f"{attempt} API Key 未配置"
             continue
@@ -1205,37 +1260,53 @@ def call_ai(prompt, context, images, user_id=None, event=None):
             print(f"[伪人] 尝试模型: {attempt}, 消息: {len(messages)}, 图片: {len(images)}")
 
             import time as _time
-            _start = _time.time()
-            resp = requests.post(
-                model_config["api_url"],
-                headers={"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"},
-                json={"model": model_config["model"], "messages": messages, "temperature": CONFIG.get("temperature", 0.8), "max_tokens": CONFIG.get("max_tokens", 500)},
-                timeout=CONFIG.get("api_timeout", 90)
-            )
-            _elapsed = _time.time() - _start
-            print(f"[伪人] 返回耗时: {_elapsed:.1f}s, 状态码: {resp.status_code}")
+            # 瞬时故障（连接被重置/超时/限流/5xx）先在**同一模型**上重试一次，再谈切换：
+            # 2026-10-28 实测中转偶发 ConnectionReset + 5xx，一次重试就能救回来，
+            # 而旧代码会直接判主模型死刑 → 备模型也挂 → 给用户回兜底文案。
+            _TRANSIENT = (429, 500, 502, 503, 504)
+            _RETRY_DELAY = 1.2
+            resp = None
+            for _try in range(2):
+                _start = _time.time()
+                try:
+                    resp = requests.post(
+                        model_config["api_url"],
+                        headers={"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"},
+                        json={"model": model_config["model"], "messages": messages, "temperature": CONFIG.get("temperature", 0.8), "max_tokens": CONFIG.get("max_tokens", 500)},
+                        timeout=(CONFIG.get("api_timeout", 90)
+                                 if attempt == _primary_model_name()
+                                 else min(CONFIG.get("api_timeout", 90), 30))
+                    )
+                except Exception as _e:
+                    if _try == 0:
+                        print(f"[伪人] {attempt} 连接异常，{_RETRY_DELAY}s 后重试一次: {_e}")
+                        time.sleep(_RETRY_DELAY)
+                        continue
+                    raise
+                _elapsed = _time.time() - _start
+                print(f"[伪人] 返回耗时: {_elapsed:.1f}s, 状态码: {resp.status_code}" + ("（重试）" if _try else ""))
+                if resp.status_code in _TRANSIENT and _try == 0:
+                    print(f"[伪人] {attempt} 返回 {resp.status_code}，{_RETRY_DELAY}s 后重试一次")
+                    time.sleep(_RETRY_DELAY)
+                    continue
+                break
 
             if resp.status_code == 200:
                 with _model_lock:
-                    if attempt == primary and _active_model:
-                        print(f"[伪人] 主模型 {primary} 已恢复，切回")
-                        _active_model = None
-                        _primary_fail_time = 0
-                    elif attempt == backup and _active_model is None:
-                        _active_model = backup
+                    if attempt == _primary_model_name():
+                        if _active_model:
+                            print(f"[伪人] 主模型 {attempt} 已恢复，切回")
+                            _active_model = None
+                            _primary_fail_time = 0
+                    elif _active_model != attempt:
+                        _active_model = attempt
                         _primary_fail_time = _time.time()
-                        print(f"[伪人] 主模型 {primary} 不可用，切换至 {backup}")
+                        print(f"[伪人] 主模型 {primary} 不可用，暂用 {attempt}")
                 return resp.json()["choices"][0]["message"]["content"], None
             last_error = f"{attempt} API 错误: {resp.status_code}"
         except Exception as e:
             last_error = f"{attempt} 调用失败: {e}"
-            with _model_lock:
-                if attempt == primary:
-                    _active_model = backup
-                    _primary_fail_time = time.time()
-                    print(f"[伪人] 主模型 {primary} 失败，切换至 {backup}: {e}")
-                else:
-                    print(f"[伪人] 备份模型 {backup} 也失败: {e}")
+            print(f"[伪人] {attempt} 调用异常，试下一个: {e}")
 
     return None, last_error
 
@@ -1305,6 +1376,7 @@ def _cmd_disable(event, raw, kw):
 
 
 def _cmd_switch_glm(event, raw, kw):
+    global _active_model, _primary_fail_time
     CONFIG["current_model"] = "glm"
     save_config()
     with _model_lock:
@@ -1315,6 +1387,7 @@ def _cmd_switch_glm(event, raw, kw):
 
 
 def _cmd_switch_gemini(event, raw, kw):
+    global _active_model, _primary_fail_time
     CONFIG["current_model"] = "gemini"
     save_config()
     with _model_lock:
@@ -1325,8 +1398,32 @@ def _cmd_switch_gemini(event, raw, kw):
 
 
 def _cmd_current_model(event, raw, kw):
-    model = CONFIG.get("current_model", "glm")
-    send_message(event, msg("current_model", "当前模型: {model}").format(model=model.upper()))
+    slot = CONFIG.get("current_model", "gemini")
+    name = _primary_model_name()
+    chain = [c for c in _parse_model_chain() if c != name]
+    tip = f"（备选：{'/'.join(chain)}）" if chain else ""
+    send_message(event, msg("current_model", "当前模型: {model}").format(model=f"{name}{tip}"))
+    return True
+
+
+def _cmd_use_model(event, raw, kw):
+    """切换模型 <型号>：直接换 gemini 槽位里的型号名（同一中转/同一把 key）"""
+    global _active_model, _primary_fail_time
+    name = (raw or "")[len(kw):].strip()
+    if not name:
+        chain = _parse_model_chain()
+        send_message(event, "用法：切换模型 <型号>，例如 切换模型 gemini-3.7-flash"
+                            + (f"。当前备选链：{', '.join(chain)}" if chain else ""))
+        return True
+    cfg = dict(CONFIG.get("gemini") or {})
+    cfg["model"] = name
+    CONFIG["gemini"] = cfg
+    CONFIG["current_model"] = "gemini"
+    save_config()
+    with _model_lock:
+        _active_model = None
+        _primary_fail_time = 0
+    send_message(event, f"已切换到 {name}")
     return True
 
 
@@ -1348,6 +1445,7 @@ registry.register("关闭伪人", [cmd("disable", "关闭伪人")], "关闭伪�
 registry.register("切换GLM模型", [cmd("switch_glm", "切换glm"), cmd("switch_glm_alt", "用glm")], "把 AI 模型切换为 GLM", _cmd_switch_glm, master_only=True)
 registry.register("切换Gemini模型", [cmd("switch_gemini", "切换gemini"), cmd("switch_gemini_alt", "用gemini")], "把 AI 模型切换为 Gemini", _cmd_switch_gemini, master_only=True)
 registry.register("查看当前模型", [cmd("current_model", "当前模型"), cmd("current_model_alt", "用什么模型")], "查看当前使用的 AI 模型", _cmd_current_model, master_only=True)
+registry.register("切换模型型号", [cmd("use_model", "切换模型")], "把 AI 换成指定型号（同一条中转上切换）", _cmd_use_model, master_only=True, kind="prefix")
 registry.register("清除会话历史", [cmd("clear_history", "清除历史"), cmd("clear_history_alt", "清空历史"), cmd("clear_history_alt2", "清空记忆")], "清除当前会话的对话历史", _cmd_clear_history, master_only=True)
 registry.register("清除所有历史", [cmd("clear_all", "清除所有历史"), cmd("clear_all_alt", "清空所有历史"), cmd("clear_all_alt2", "清空所有记忆")], "清除全部会话的对话历史", _cmd_clear_all, master_only=True)
 
