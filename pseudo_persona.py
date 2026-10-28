@@ -288,6 +288,21 @@ __config_schema__ = {
         "help": "开启后 AI 可用 [语音](内容) 发语音；本机 piper 合成 wav → NapCat 自动转 silk",
         "default": True,
     },
+    "tts_backend": {
+        "type": "select", "label": "TTS 后端", "group": "语音",
+        "path": "tts_backend",
+        "options": [{"value": "auto", "label": "自动（优先 edge，失败回退 piper）"},
+                    {"value": "edge", "label": "edge 在线（最像真人，需联网）"},
+                    {"value": "piper", "label": "piper 本地（离线，音色偏播音）"}],
+        "help": "edge 用微软 Edge 的免费神经音色，无需 key；piper 完全离线、CPU 合成",
+        "default": "auto",
+    },
+    "tts_voice": {
+        "type": "text", "label": "edge 音色", "group": "语音",
+        "path": "tts_voice",
+        "help": "如 zh-CN-XiaoyiNeural（活泼少女）/ zh-CN-XiaoxiaoNeural（温柔女声）/ zh-CN-YunxiNeural（少年男声）/ zh-CN-liaoning-XiaobeiNeural（东北话）",
+        "default": "zh-CN-XiaoyiNeural",
+    },
     "tts_python": {
         "type": "text", "label": "TTS 解释器", "group": "语音", "advanced": True,
         "path": "tts_python",
@@ -465,8 +480,18 @@ def _tts_available():
     return bool(m and py and os.path.isfile(m) and os.path.isfile(py) and os.path.isfile(_TTS_WORKER))
 
 
+def _tts_backends():
+    """按配置给出尝试顺序：auto → [edge, piper]；指定则只有一个"""
+    b = (CONFIG.get("tts_backend") or "auto").strip().lower()
+    if b == "edge":
+        return ["edge"]
+    if b == "piper":
+        return ["piper"]
+    return ["edge", "piper"]
+
+
 def _tts_synth(text):
-    """调子进程跑 piper 合成 wav，返回 (wav路径, 错误)。失败一律返回 (None, 原因)。"""
+    """按后端顺序合成，返回 (音频路径, 错误)。edge 失败会自动回退 piper（auto 模式）。"""
     text = (text or "").strip()
     if not text:
         return None, "空文本"
@@ -478,24 +503,41 @@ def _tts_synth(text):
         import tempfile
         fd, txt = tempfile.mkstemp(suffix=".txt", dir=_TTS_TMP)
         os.close(fd)
-        out = os.path.join(_TTS_TMP, f"tts_{int(time.time()*1000)}_{random.randint(1000,9999)}.wav")
         with open(txt, "w", encoding="utf-8") as f:
             f.write(text)
-        _t0 = time.time()
-        r = subprocess.run(
-            [CONFIG.get("tts_python"), _TTS_WORKER, "--model", CONFIG.get("tts_model"),
-             "--text-file", txt, "--out", out],
-            capture_output=True, text=True,
-            timeout=max(5, int(CONFIG.get("tts_timeout", 60) or 60)),
-        )
+        err = "未知错误"
+        for backend in _tts_backends():
+            out = os.path.join(_TTS_TMP, f"tts_{int(time.time()*1000)}_{random.randint(1000,9999)}"
+                                           + (".mp3" if backend == "edge" else ".wav"))
+            args = [CONFIG.get("tts_python"), _TTS_WORKER, "--backend", backend,
+                    "--text-file", txt, "--out", out]
+            if backend == "edge":
+                args += ["--voice", (CONFIG.get("tts_voice") or "zh-CN-XiaoyiNeural")]
+            else:
+                args += ["--model", CONFIG.get("tts_model")]
+            _t0 = time.time()
+            try:
+                r = subprocess.run(args, capture_output=True, text=True,
+                                   timeout=max(5, int(CONFIG.get("tts_timeout", 60) or 60)))
+            except Exception as e:
+                err = f"{backend} {type(e).__name__}"
+                print(f"[伪人] TTS {backend} 异常: {e}")
+                continue
+            if r.returncode == 0 and os.path.exists(out):
+                try:
+                    os.remove(txt)
+                except Exception:
+                    pass
+                print(f"[伪人] 语音合成({backend}): {len(text)}字 {time.time()-_t0:.1f}s "
+                      f"-> {os.path.getsize(out)//1024}KB")
+                return out, None
+            err = (r.stderr or r.stdout or "未知错误").strip().splitlines()[-1][:120]
+            print(f"[伪人] TTS {backend} 失败，试下一个: {err}")
         try:
             os.remove(txt)
         except Exception:
             pass
-        if r.returncode != 0 or not os.path.exists(out):
-            return None, (r.stderr or r.stdout or "未知错误").strip().splitlines()[-1][:120]
-        print(f"[伪人] 语音合成: {len(text)}字 {time.time()-_t0:.1f}s -> {os.path.getsize(out)//1024}KB")
-        return out, None
+        return None, err
     except Exception as e:
         return None, f"{type(e).__name__}: {e}"
 
@@ -894,6 +936,8 @@ CONFIG = {
 
     # 本地 TTS（[语音](文本)：piper 合成 wav → NapCat 自动转 silk 发送）
     "tts_enabled": True,
+    "tts_backend": "auto",        # auto=先 edge(像真人)、失败回退 piper(离线)
+    "tts_voice": "zh-CN-XiaoyiNeural",
     "tts_python": "/root/mybot2/tts-venv/bin/python",
     "tts_model": "/root/mybot2/data/tts/zh_CN-huayan-medium.onnx",
     "tts_max_chars": 40,
