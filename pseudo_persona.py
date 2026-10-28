@@ -281,6 +281,38 @@ __config_schema__ = {
         "default": "gemini-2.5-flash, gemini-3.7-flash, glm-5.3-flash",
     },
 
+    # ---------------- 语音（本地 TTS） ----------------
+    "tts_enabled": {
+        "type": "bool", "label": "启用语音", "group": "语音",
+        "path": "tts_enabled",
+        "help": "开启后 AI 可用 [语音](内容) 发语音；本机 piper 合成 wav → NapCat 自动转 silk",
+        "default": True,
+    },
+    "tts_python": {
+        "type": "text", "label": "TTS 解释器", "group": "语音", "advanced": True,
+        "path": "tts_python",
+        "help": "装了 piper 的 python（默认 /root/mybot2/tts-venv/bin/python）",
+        "default": "/root/mybot2/tts-venv/bin/python",
+    },
+    "tts_model": {
+        "type": "text", "label": "TTS 音色模型", "group": "语音", "advanced": True,
+        "path": "tts_model",
+        "help": "piper 的 .onnx 路径（默认中文女声 zh_CN-huayan-medium）",
+        "default": "/root/mybot2/data/tts/zh_CN-huayan-medium.onnx",
+    },
+    "tts_max_chars": {
+        "type": "number", "label": "语音最长字数", "group": "语音",
+        "path": "tts_max_chars", "min": 5, "max": 80, "step": 5, "unit": "字",
+        "help": "超过就走文本、不发语音（QQ 语音太长没人听）",
+        "default": 40,
+    },
+    "tts_timeout": {
+        "type": "number", "label": "合成超时", "group": "语音", "advanced": True,
+        "path": "tts_timeout", "min": 5, "max": 120, "step": 5, "unit": "秒",
+        "help": "子进程合成上限（含模型加载 ~4s）",
+        "default": 60,
+    },
+
     # ---------------- 表情包 ----------------
     "sticker_enabled": {
         "type": "bool", "label": "启用表情包", "group": "表情包",
@@ -360,6 +392,15 @@ _sticker_mtime = 0
 _sticker_lock = threading.Lock()
 _sticker_state = {}            # 会话 -> {"last": 时间戳, "recent": [路径...]}
 
+# ============ 语音（本地 TTS，piper）============
+_TTS_WORKER = os.path.join(os.path.dirname(__file__), "tts_worker.py")
+_TTS_TMP = os.path.join(os.path.dirname(__file__), "..", "data", "tts_cache")
+_VOICE_MAX_KB = 1024
+try:
+    os.makedirs(_TTS_TMP, exist_ok=True)
+except Exception:
+    _TTS_TMP = os.path.join(os.path.dirname(__file__), "..", "data")
+
 
 def _load_stickers(force=False):
     """读 data/stickers.json（{"tags": {标签: [相对路径]}}）；按 mtime 热更新，失败则视为空库"""
@@ -415,6 +456,73 @@ def _sticker_pick(tag, session_key):
     return pick
 
 
+def _tts_available():
+    """本地 TTS 是否可用：开关 + 解释器 + 模型 + worker 脚本都在"""
+    if not CONFIG.get("tts_enabled", True):
+        return False
+    m = (CONFIG.get("tts_model") or "").strip()
+    py = (CONFIG.get("tts_python") or "").strip()
+    return bool(m and py and os.path.isfile(m) and os.path.isfile(py) and os.path.isfile(_TTS_WORKER))
+
+
+def _tts_synth(text):
+    """调子进程跑 piper 合成 wav，返回 (wav路径, 错误)。失败一律返回 (None, 原因)。"""
+    text = (text or "").strip()
+    if not text:
+        return None, "空文本"
+    limit = int(CONFIG.get("tts_max_chars", 40) or 40)
+    if len(text) > limit:
+        return None, f"太长({len(text)}>{limit}字)"
+    try:
+        import subprocess
+        import tempfile
+        fd, txt = tempfile.mkstemp(suffix=".txt", dir=_TTS_TMP)
+        os.close(fd)
+        out = os.path.join(_TTS_TMP, f"tts_{int(time.time()*1000)}_{random.randint(1000,9999)}.wav")
+        with open(txt, "w", encoding="utf-8") as f:
+            f.write(text)
+        _t0 = time.time()
+        r = subprocess.run(
+            [CONFIG.get("tts_python"), _TTS_WORKER, "--model", CONFIG.get("tts_model"),
+             "--text-file", txt, "--out", out],
+            capture_output=True, text=True,
+            timeout=max(5, int(CONFIG.get("tts_timeout", 60) or 60)),
+        )
+        try:
+            os.remove(txt)
+        except Exception:
+            pass
+        if r.returncode != 0 or not os.path.exists(out):
+            return None, (r.stderr or r.stdout or "未知错误").strip().splitlines()[-1][:120]
+        print(f"[伪人] 语音合成: {len(text)}字 {time.time()-_t0:.1f}s -> {os.path.getsize(out)//1024}KB")
+        return out, None
+    except Exception as e:
+        return None, f"{type(e).__name__}: {e}"
+
+
+def _voice_segment(text):
+    """[语音](文本) → record 段（base64 wav；NapCat 自己转 silk）"""
+    path, err = _tts_synth(text)
+    if not path:
+        print(f"[伪人] 语音未发送: {err}")
+        return None
+    try:
+        if os.path.getsize(path) > _VOICE_MAX_KB * 1024:
+            print(f"[伪人] 语音过大({os.path.getsize(path)//1024}KB)，跳过")
+            return None
+        with open(path, "rb") as f:
+            b64 = base64.b64encode(f.read()).decode()
+        return {"type": "record", "data": {"file": "base64://" + b64}}
+    except Exception as e:
+        print(f"[伪人] 语音编码失败: {e}")
+        return None
+    finally:
+        try:
+            os.remove(path)
+        except Exception:
+            pass
+
+
 def _sticker_segment(path):
     """图片消息段（sub_type=1 表示表情/动画表情）；走 base64:// 免去宿主机→容器路径映射"""
     try:
@@ -446,7 +554,17 @@ def _sticker_prompt():
         "想发表情时，在句末单独写一个 [表情:标签]，标签只能从上表里选；一次回复最多 %d 个。\n"
         "表情必须贴合这句话的情绪；拿不准就不发。别人在问正事、你刚发过、或这句话是认真安慰/道歉时，不要发。\n"
         "不要把 [表情:…] 塞进括号、引号或句号里，也不要解释这个语法。" % maxn
-    )
+    ) + _voice_prompt()
+
+
+def _voice_prompt():
+    """语音能力的提示词片段：没装好 TTS 就给"无权限"旗标，绝不教模型输出没实现的语法"""
+    if not _tts_available():
+        return "\n[语音权限=假]（你当前发不了语音，不要输出 [语音](…) 语法。）"
+    limit = int(CONFIG.get("tts_max_chars", 40) or 40)
+    return ("\n[语音权限=真]\n"
+            "想发语音时，单独写一句 [语音](要念出来的内容)，内容必须是口语、%d 字以内、不带情绪描述和旁白；"
+            "一次回复最多一条语音，而且语音是单独发出去的一条消息，不要和其它内容挤在同一句里。" % limit)
 
 
 def _build_segments(text, session_key="", budget=None):
@@ -456,18 +574,31 @@ def _build_segments(text, session_key="", budget=None):
     堵掉"AI 或群友诱导输出 [CQ:...] 直接生效"的注入面。
     """
     if budget is None:
-        budget = {"left": int(CONFIG.get("sticker_max_per_reply", 1) or 0)}
+        budget = {"left": int(CONFIG.get("sticker_max_per_reply", 1) or 0), "voice": 1}
     # 模型有时会把占位符原样吐出来（[@QQ] / [@用户]），这类非数字的 @ 直接丢掉
     text = re.sub(r"\[@\s*(?!\d+\])\S{1,6}?\]", "", text or "")
-    # 已废弃的语法（提示词里已删，但历史上下文里还留着，模型会模仿）：一律剥掉
+    # 已废弃的语法（提示词里已删，但历史上下文里还留着，模型会模仿）：剥掉
+    # 注：[语音](…) 不再剥离 —— 本地 TTS 上线后它是**有效**语法
     text = re.sub(r"!\[[^\]]{0,24}\]\([^)]{0,400}\)", "", text)   # ![名称](地址)
-    text = re.sub(r"\[语音\]\([^)]{0,80}\)", "", text)              # [语音](文本)
     segs, last = [], 0
     for m in _TOKEN_RE.finditer(text):
         if m.start() > last:
             segs.append({"type": "text", "data": {"text": text[last:m.start()]}})
         if m.group(1):
             segs.append({"type": "at", "data": {"qq": int(m.group(1))}})
+        elif m.group(3) is not None:
+            if int(budget.get("voice", 1)) <= 0:
+                seg = None
+                print("[伪人] 语音已用过一条，其余转文本")
+            else:
+                seg = _voice_segment(m.group(3)) if _tts_available() else None
+                if seg:
+                    budget["voice"] = int(budget.get("voice", 1)) - 1
+            if seg:
+                segs.append(seg)
+            else:
+                print(f"[伪人] 语音未发送: {m.group(3)[:20]}")
+                segs.append({"type": "text", "data": {"text": m.group(3)}})   # 合成失败就把话当文本发了
         else:
             tag = (m.group(2) or "").strip()
             seg = None
@@ -490,7 +621,7 @@ def _build_segments(text, session_key="", budget=None):
     return [{"type": "text", "data": {"text": text}}] if (text or "").strip() else []
 
 
-_TOKEN_RE = re.compile(r"\[@(\d+)\]|\[表情\s*[:：]\s*([^\]\s]{1,12})\]")
+_TOKEN_RE = re.compile(r"\[@(\d+)\]|\[表情\s*[:：]\s*([^\]\s]{1,12})\]|\[语音\]\(([^)]{1,80})\)")
 
 
 def _split_messages(segs):
@@ -501,7 +632,7 @@ def _split_messages(segs):
     """
     msgs, buf = [], []
     for s in segs or []:
-        if s.get("type") == "image":
+        if s.get("type") in ("image", "record"):
             if buf:
                 msgs.append(buf)
                 buf = []
@@ -760,6 +891,13 @@ CONFIG = {
     "sticker_enabled": True,
     "sticker_max_per_reply": 1,
     "sticker_cooldown_sec": 30,
+
+    # 本地 TTS（[语音](文本)：piper 合成 wav → NapCat 自动转 silk 发送）
+    "tts_enabled": True,
+    "tts_python": "/root/mybot2/tts-venv/bin/python",
+    "tts_model": "/root/mybot2/data/tts/zh_CN-huayan-medium.onnx",
+    "tts_max_chars": 40,
+    "tts_timeout": 60,
 
     # 低价备选型号链（同一个中转/同一把 key，逗号分隔；实测同组可用见 schema help）
     "gemini_fallback_models": "gemini-2.5-flash, gemini-3.7-flash, glm-5.3-flash",
