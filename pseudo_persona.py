@@ -542,9 +542,38 @@ def _tts_synth(text):
         return None, f"{type(e).__name__}: {e}"
 
 
+_TTS_EMOJI_RE = re.compile(
+    "[\U0001F000-\U0001FAFF\u2600-\u27BF\u2B00-\u2BFF\uFE0F\u200D\u2190-\u21FF\u2300-\u23FF]")
+_TTS_KEEP_RE = re.compile(r"[^\u4e00-\u9fff\u3040-\u30ffA-Za-z0-9，。！？、；：]")
+
+
+def _tts_clean(text):
+    """把要念的内容洗干净：去掉颜文字 / emoji / 括注 / 符号噪音。
+
+    TTS 念到 "(?′ω`)""(◕‿◕)" 这类颜文字会读出怪音甚至断句，所以语音内容只保留
+    「汉字 + 假名 + 数字字母 + 中文标点」。**只洗语音**：普通文本消息里的颜文字是人设，不动。
+    """
+    t = text or ""
+    # 括注 / 方括号 / 未闭合的括号（颜文字常带半个括号，比如 (?′ω`?)
+    t = re.sub(r"\([^)]{0,40}\)|（[^）]{0,40}）|\[[^\]]{0,40}\]|【[^】]{0,40}】", "", t)
+    t = re.sub(r"\([^)]*$|（[^）]*$", "", t)
+    t = _TTS_EMOJI_RE.sub("", t)
+    t = _TTS_KEEP_RE.sub("", t)                     # 剩下的符号（′ω`^~_*|など）一律丢
+    t = re.sub(r"([，。！？、；：])\1+", r"\1", t)     # 标点堆叠收敛：！！！→！
+    t = re.sub(r"\s+", " ", t).strip(" ，。！？、；：")
+    return t.strip()
+
+
 def _voice_segment(text):
     """[语音](文本) → record 段（base64 wav；NapCat 自己转 silk）"""
-    path, err = _tts_synth(text)
+    raw = (text or "").strip()
+    spoken = _tts_clean(raw)
+    if spoken != raw:
+        print(f"[伪人] 语音内容已清洗: {raw[:30]!r} -> {spoken[:30]!r}")
+    if len(spoken) < 2:
+        print(f"[伪人] 语音未发送: 清洗后没有可念的内容({raw[:20]!r})")
+        return None
+    path, err = _tts_synth(spoken)
     if not path:
         print(f"[伪人] 语音未发送: {err}")
         return None
@@ -605,8 +634,53 @@ def _voice_prompt():
         return "\n[语音权限=假]（你当前发不了语音，不要输出 [语音](…) 语法。）"
     limit = int(CONFIG.get("tts_max_chars", 40) or 40)
     return ("\n[语音权限=真]\n"
-            "想发语音时，单独写一句 [语音](要念出来的内容)，内容必须是口语、%d 字以内、不带情绪描述和旁白；"
-            "一次回复最多一条语音，而且语音是单独发出去的一条消息，不要和其它内容挤在同一句里。" % limit)
+            "想发语音时，单独写一句 [语音](要念出来的内容)。\n"
+            "语音内容规则（必须遵守）：\n"
+            "1. 语音里**只能有要念出来的字**，%d 字以内；\n"
+            "2. 语音里**绝对禁止颜文字、emoji、括号里的动作/情绪说明**：\n"
+            "   错误：[语音](真过分(?′ω`?))  ← 后面带了颜文字，禁止\n"
+            "   错误：[语音](人家才没有（害羞）)  ← 括号里写情绪，禁止\n"
+            "   正确：[语音](真过分)\n"
+            "   正确：[语音](人家才没有想你呢)\n"
+            "3. 不要标点堆叠（！！！→！），不要换行；\n"
+            "4. 一次回复最多一条语音，语音单独成条，不要和其它内容挤在同一句里；\n"
+            "5. **颜文字、emoji 只放在文字消息里**（比如另外发一句\"真过分(?′ω`?)\"），语音里一个都不要有。" % limit)
+
+
+def _split_voice_tokens(text):
+    """把 [语音](…) 扫出来，**括号成对匹配**。
+
+    为什么不能用一个正则：语音内容里常有颜文字 `(?′ω`?)`，它自带半个 `)`，
+    非贪婪正则会在这里提前截断 → 剩下的 `?))` 变成一条纯标点消息发到群里（真实踩过）。
+    返回 [(start, end, content), ...]，content 是括号内原文。
+    """
+    out, i, n = [], 0, len(text or "")
+    while i < n:
+        j = text.find("[语音]", i)
+        if j < 0:
+            break
+        k = j + len("[语音]")
+        if k >= n or text[k] not in "(（：:":
+            i = j + len("[语音]")
+            continue
+        if text[k] in "：:":
+            k += 1
+            if k >= n or text[k] not in "(（":
+                i = k
+                continue
+        k += 1                      # 跳过开括号（半角/全角）
+        depth, start = 1, k
+        while k < n and depth:
+            c = text[k]
+            if c in "(（":
+                depth += 1
+            elif c in ")）":
+                depth -= 1
+            k += 1
+        content = text[start:(k - 1) if depth == 0 else n]
+        out.append((j, k if depth == 0 else n, content))
+        i = k if depth == 0 else n
+    return out
 
 
 def _build_segments(text, session_key="", budget=None):
@@ -622,6 +696,16 @@ def _build_segments(text, session_key="", budget=None):
     # 已废弃的语法（提示词里已删，但历史上下文里还留着，模型会模仿）：剥掉
     # 注：[语音](…) 不再剥离 —— 本地 TTS 上线后它是**有效**语法
     text = re.sub(r"!\[[^\]]{0,24}\]\([^)]{0,400}\)", "", text)   # ![名称](地址)
+    # 语音 token 先抠出来（括号配对），换成占位符，交给后面的单遍解析统一定位
+    _voices = _split_voice_tokens(text)
+    if _voices:
+        buf, _last = [], 0
+        for _idx, (_s, _e, _c) in enumerate(_voices):
+            buf.append(text[_last:_s])
+            buf.append(f"\x00V{_idx}\x00")
+            _last = _e
+        buf.append(text[_last:])
+        text = "".join(buf)
     segs, last = [], 0
     for m in _TOKEN_RE.finditer(text):
         if m.start() > last:
@@ -629,18 +713,21 @@ def _build_segments(text, session_key="", budget=None):
         if m.group(1):
             segs.append({"type": "at", "data": {"qq": int(m.group(1))}})
         elif m.group(3) is not None:
+            _raw = _voices[int(m.group(3))][2] if int(m.group(3)) < len(_voices) else ""
             if int(budget.get("voice", 1)) <= 0:
                 seg = None
                 print("[伪人] 语音已用过一条，其余转文本")
             else:
-                seg = _voice_segment(m.group(3)) if _tts_available() else None
+                seg = _voice_segment(_raw) if _tts_available() else None
                 if seg:
                     budget["voice"] = int(budget.get("voice", 1)) - 1
             if seg:
                 segs.append(seg)
             else:
-                print(f"[伪人] 语音未发送: {m.group(3)[:20]}")
-                segs.append({"type": "text", "data": {"text": m.group(3)}})   # 合成失败就把话当文本发了
+                print(f"[伪人] 语音未发送: {_tts_clean(_raw)[:20] or '(无可念内容)'}")
+                _txt = _tts_clean(_raw)
+                if _txt:
+                    segs.append({"type": "text", "data": {"text": _txt}})   # 合成失败就把话当文本发
         else:
             tag = (m.group(2) or "").strip()
             seg = None
@@ -656,14 +743,20 @@ def _build_segments(text, session_key="", budget=None):
         last = m.end()
     if last < len(text):
         segs.append({"type": "text", "data": {"text": text[last:]}})
-    keep = [s for s in segs if not (s["type"] == "text" and not (s["data"].get("text") or "").strip())]
-    if keep:
-        return keep
-    # 整条被清空（例如只吐了个废弃语法）→ 干脆不发，别发一条空消息
-    return [{"type": "text", "data": {"text": text}}] if (text or "").strip() else []
+    # 纯标点 / 颜文字残渣（如 "?))"、"..."）不发：它们只会变成群里的噪声消息
+    def _has_word(s):
+        return bool(re.search(r"[\u4e00-\u9fffA-Za-z0-9]", s or ""))
+    keep = [s for s in segs
+            if not (s["type"] == "text" and not _has_word(s["data"].get("text")))]
+    # 兜底：任何残留的语音占位符都不许当文本发出去
+    for _s in keep:
+        if _s["type"] == "text":
+            _s["data"]["text"] = re.sub(r"\x00V\d+\x00", "", _s["data"]["text"]).strip()
+    keep = [s for s in keep if not (s["type"] == "text" and not _has_word(s["data"].get("text")))]
+    return keep   # 全空（只吐了个语法/颜文字）→ 返回 []，一条都不发
 
 
-_TOKEN_RE = re.compile(r"\[@(\d+)\]|\[表情\s*[:：]\s*([^\]\s]{1,12})\]|\[语音\]\(([^)]{1,80})\)")
+_TOKEN_RE = re.compile(r"\[@(\d+)\]|\[表情\s*[:：]\s*([^\]\s]{1,12})\]|\x00V(\d+)\x00")
 
 
 def _split_messages(segs):
