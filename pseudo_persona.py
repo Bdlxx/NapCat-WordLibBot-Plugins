@@ -1074,14 +1074,15 @@ _SYSTEM_SUPPLEMENT_INSTRUCTIONS = """<system_instructions>
 不要暴露自己"听不懂、看不懂、不明白"的想法，就算是看不懂的内容也要学着其他人的讨论内容假装很懂，千万不要说出"这是什么意思、完全搞不懂、不知道你们在做什么"等内容，这无疑会暴露你的ai设定。
 
 
-称呼对方时，请使用[nick]（对方设置的自定义昵称），如果[nick]为空则使用对方的QQ昵称。
+这次跟你说话的人是[nick]（若为"对方"则是名单里最近发言的那个人）。
+称呼别人时**不要一律用**[nick]：用[本次对话参与者]名单里那个人自己的名字；名单里没有的人不许编名字，直接说"你"或写对方的QQ号。
 </core_principles>
 
 [在群里不仅有人类，还有机器人。请仔细辨别，并好好伪装自己的身份。不要因为过于好奇和愚笨而暴露了自己的身份。]
 
 </system_instructions>"""
 
-def build_system_prompt(user_id=None, event=None, additional_user_ids=None):
+def build_system_prompt(user_id=None, event=None, additional_user_ids=None, context=None):
     """构建系统提示（分层人设）：
     第一层：默认人设 —— 仅传递核心关键信息（身份/基础风格/图片评论/安全兜底），保障基础运行功能；
     第二层：自定义人格 —— user_persona / persona 存在时启用，并指示 AI 在此基础上做「深度人格特征判定」，
@@ -1138,17 +1139,72 @@ def build_system_prompt(user_id=None, event=None, additional_user_ids=None):
     if memory_context:
         combined += "\n\n[长期记忆]\n" + memory_context
 
+    # ===== 参与者名单 + 称呼规则（治"叫错人/瞎编名字"）=====
+    # 名字来源只有两处：上下文每行的「名字(QQ): 」前缀、以及 [nick]（= 当前发言者）。
+    # 模型要称呼"别人"时，原来的指令会让它用 [nick]（当前发言者）→ 必然叫错。
+    nick = get_nickname(user_id) if user_id else None
+    if not nick and event:
+        sender = event.get("sender", {})
+        nick = sender.get("card") or sender.get("nickname") or ""
+    nick = (nick or "").strip()
+    combined += "\n\n" + _participants_block(context, user_id, nick)
+
     # ===== 系统补充指令（硬编码：群聊伪装/输出规范，非人格层）——放在 system prompt 最后 =====
     # 不可通过配置修改，保障行为规范稳定
     combined += "\n\n[系统补充指令]\n" + _SYSTEM_SUPPLEMENT_INSTRUCTIONS
 
-    nick = get_nickname(user_id) if user_id else None
-    if not nick and event:
-        sender = event.get("sender", {})
-        nick = sender.get("card") or sender.get("nickname") or "对方"
-
     combined = combined.replace("[nick]", nick or "对方")
     return combined
+
+
+_PARTICIPANT_RE = re.compile(r"^([^()\n]{1,24}?)\((\d{5,12})\)\s*[:：]")
+
+
+def _participants_block(context, current_uid, current_name):
+    """从上下文前缀里还原「本次对话参与者」，拼成名单 + 称呼规则。
+
+    名单是模型唯一被允许用来称呼人的依据；这样它不必从聊天流里猜名字，
+    也不会把人设里的"主人/星汐"套到别人身上。
+    """
+    try:
+        masters = get_config("MASTER_QQ", []) or []
+        if not isinstance(masters, (list, tuple, set)):
+            masters = [masters]
+        masters = {str(m).strip() for m in masters}
+    except Exception:
+        masters = set()
+
+    seen = {}                      # qq -> 名字（按出现顺序，后者覆盖）
+    for rec in (context or [])[:200]:
+        m = _PARTICIPANT_RE.match((rec.get("content") or "").strip())
+        if m:
+            seen[m.group(2)] = m.group(1).strip()
+    if current_uid:
+        seen[str(current_uid)] = current_name or seen.get(str(current_uid), "")
+
+    if not seen:
+        return ""
+    items = list(seen.items())[-12:]          # 最多 12 人，取最近的
+    lines = []
+    for qq, name in items:
+        line = f"- {name or '（未设置昵称）'}({qq})"
+        if qq in masters:
+            line += "（主人）"
+        custom = get_nickname(qq)
+        if custom and name and custom != name:
+            line += f"（他自设的昵称：{custom}）"
+        lines.append(line)
+
+    rules = (
+        "[本次对话参与者]\n" + "\n".join(lines) + "\n"
+        "[称呼规则]\n"
+        "1. 这次跟你说话的人是「" + (current_name or "对方") + "」。要称呼谁，就用那个人在名单里的名字。\n"
+        "2. 不要给名单外的人起名字，也不要凭印象编造名字；不确定就直接说\"你\"或写出对方的QQ号。\n"
+        "3. 名单里的写法就是标准写法：不要改字、不要加\"小/老\"、不要翻译成别的说法。\n"
+        "4. 人设里的人名（例如主人\"星汐\"）只能用在名单里标注「主人」的那个人身上，对其他人绝对不要用。\n"
+        "5. 同一个人在本群有群名片、又有自设昵称时，名单里已经并列标出，两者指同一人。"
+    )
+    return rules
 
 def _parse_model_chain():
     """低价备选型号（同一条中转、同一个 key），按配置顺序尝试。
@@ -1225,7 +1281,9 @@ def call_ai(prompt, context, images, user_id=None, event=None):
             continue
 
         try:
-            system_prompt = build_system_prompt(user_id=user_id, event=event, additional_user_ids=list(additional_ids))
+            system_prompt = build_system_prompt(user_id=user_id, event=event,
+                                                additional_user_ids=list(additional_ids),
+                                                context=context)
             messages = [{"role": "system", "content": system_prompt}]
             messages.extend(context)
 
