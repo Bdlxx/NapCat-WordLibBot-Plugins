@@ -459,6 +459,9 @@ def _build_segments(text, session_key="", budget=None):
         budget = {"left": int(CONFIG.get("sticker_max_per_reply", 1) or 0)}
     # 模型有时会把占位符原样吐出来（[@QQ] / [@用户]），这类非数字的 @ 直接丢掉
     text = re.sub(r"\[@\s*(?!\d+\])\S{1,6}?\]", "", text or "")
+    # 已废弃的语法（提示词里已删，但历史上下文里还留着，模型会模仿）：一律剥掉
+    text = re.sub(r"!\[[^\]]{0,24}\]\([^)]{0,400}\)", "", text)   # ![名称](地址)
+    text = re.sub(r"\[语音\]\([^)]{0,80}\)", "", text)              # [语音](文本)
     segs, last = [], 0
     for m in _TOKEN_RE.finditer(text):
         if m.start() > last:
@@ -481,7 +484,10 @@ def _build_segments(text, session_key="", budget=None):
     if last < len(text):
         segs.append({"type": "text", "data": {"text": text[last:]}})
     keep = [s for s in segs if not (s["type"] == "text" and not (s["data"].get("text") or "").strip())]
-    return keep or [{"type": "text", "data": {"text": text}}]
+    if keep:
+        return keep
+    # 整条被清空（例如只吐了个废弃语法）→ 干脆不发，别发一条空消息
+    return [{"type": "text", "data": {"text": text}}] if (text or "").strip() else []
 
 
 _TOKEN_RE = re.compile(r"\[@(\d+)\]|\[表情\s*[:：]\s*([^\]\s]{1,12})\]")
@@ -538,7 +544,7 @@ def _send_one(event, segs):
 
 def _send_segments(event, segs):
     """按"表情单独成条"把回复逐条发出；条与条之间留一点人味间隔"""
-    msgs = _split_messages(segs)
+    msgs = [m for m in _split_messages(segs) if m]
     for i, one in enumerate(msgs):
         if i > 0:
             time.sleep(random.uniform(0.5, 1.2))
@@ -1046,14 +1052,13 @@ _SYSTEM_SUPPLEMENT_INSTRUCTIONS = """<system_instructions>
 学习人类的打字习惯，用"|#|#|"分隔每一句话的内容，如："嗯，那就没啥用"应该发送"嗯|#|#|那就没啥用"。
 不要发送重复性的格式内容，固定回复两句话或者一句话都是不允许的，每次回复的数量都应该是符合当下话题的且符合人类行为的。不要出现分割错误："嗯|#|#|，那就没啥用"，此处标点是错误的，正确的应该是"嗯|#|#|那就没啥用"。
 
-语音发送规范需遵循"[语音](文本)"的方式发送，如："我来发个语音|#|#|[语音](卧槽)"。
-不要尝试发送文字表达的情绪，如"害羞"、"无语"、"生气"等。语音只能是口语化的或者拟声的内容，不允许发送情感描述或语音无法表达的内容。
+不要尝试发送文字表达的情绪，如"害羞"、"无语"、"生气"等，不要写「（害羞）」「*脸红*」这类旁白，情绪靠语气词和表情包表达。
 
 群内艾特对方时，用 [@对方的QQ号] 的写法，QQ 号必须是纯数字：例如对方 QQ 是 123456789，就写 [@123456789]。
 不要输出 [@QQ]、[@昵称]、[@对方] 这类占位符（那只是写法说明，不是能发送的内容）；也不要编造聊天记录里没出现过的 QQ 号。
 请注意，回复的时候不要连续艾特别人，多次回复同一个人时也不要多次艾特，你只需要艾特一次告诉对方我在跟你说话即可，或者根本不需要艾特，默认就是在回答上一条内容，人类是能够分析并看懂你在跟谁说话，所以请不要重复多次艾特。
 
-图片语法请严格遵循markdwon的语法"![图片名称](图片地址)"，禁止给图片语法外部和内部添加多余内容。
+想看/发图片就直说，不要输出 markdown 图片语法（`![](...)`）或任何链接；要发表情包请用 [表情:标签]。
 </send_specification>
 
 <core_principles>
