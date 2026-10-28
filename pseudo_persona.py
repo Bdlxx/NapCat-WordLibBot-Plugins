@@ -450,6 +450,8 @@ def _build_segments(text, session_key="", budget=None):
     """
     if budget is None:
         budget = {"left": int(CONFIG.get("sticker_max_per_reply", 1) or 0)}
+    # 模型有时会把占位符原样吐出来（[@QQ] / [@用户]），这类非数字的 @ 直接丢掉
+    text = re.sub(r"\[@\s*(?!\d+\])\S{1,6}?\]", "", text or "")
     segs, last = [], 0
     for m in _TOKEN_RE.finditer(text):
         if m.start() > last:
@@ -478,8 +480,28 @@ def _build_segments(text, session_key="", budget=None):
 _TOKEN_RE = re.compile(r"\[@(\d+)\]|\[表情\s*[:：]\s*([^\]\s]{1,12})\]")
 
 
-def _send_segments(event, segs):
-    """发一条消息（段数组）；开启自动撤回时抓 message_id 再延迟撤回"""
+def _split_messages(segs):
+    """把一段回复拆成"一条条消息"：**表情（image）必须单独成条**，绝不和文本混发。
+
+    QQ 里头像表情和文字塞在同一条消息里会被客户端当成普通图片/排版错乱，
+    所以文本+at 合并成一条，每个 image 段各自独占一条，顺序保持原样。
+    """
+    msgs, buf = [], []
+    for s in segs or []:
+        if s.get("type") == "image":
+            if buf:
+                msgs.append(buf)
+                buf = []
+            msgs.append([s])
+        else:
+            buf.append(s)
+    if buf:
+        msgs.append(buf)
+    return msgs or [segs]
+
+
+def _send_one(event, segs):
+    """发一条消息；开启自动撤回时抓 message_id 再延迟撤回"""
     if not bool(CONFIG.get("auto_recall_pseudo", False)):
         send_message(event, segs)
         return
@@ -505,6 +527,16 @@ def _send_segments(event, segs):
             print(f"[伪人] 撤回调度失败: {e}")
 
     ws_send(event, segs, on_ok=_on_ok)
+
+
+def _send_segments(event, segs):
+    """按"表情单独成条"把回复逐条发出；条与条之间留一点人味间隔"""
+    msgs = _split_messages(segs)
+    for i, one in enumerate(msgs):
+        if i > 0:
+            time.sleep(random.uniform(0.5, 1.2))
+        _send_one(event, one)
+        print(f"[伪人] 发出第 {i+1}/{len(msgs)} 条: {[s.get('type') for s in one]}")
 
 
 _fail_notice = {}              # 会话 -> 上次通知时间戳
