@@ -1466,6 +1466,93 @@ def extract_images(event):
                 images.append(url)
     return images
 
+
+def extract_mentions(event):
+    """本条消息 @ 了谁（**排除机器人自己**）：[(qq, 名字)]。
+
+    为什么必须单独取出来：`extract_text` 只拼 text 段，at 段整段被丢掉 ——
+    「@Claude 还不睡啊」到模型那里只剩「还不睡啊」，于是它以为这话是在问自己。
+    随机接话时这个坑最明显：谁都没叫它，它却抢着回答别人之间的对话，认错对象。
+    名字优先用 at 段自带的 name（NapCat 一般会给），没有就留空，落地时再解析。
+    """
+    bot_qq = str(event.get("self_id", get_config("BOT_QQ", "")))
+    out = []
+    for seg in (event.get("message") or []):
+        if seg.get("type") != "at":
+            continue
+        data = seg.get("data") or {}
+        qq = str(data.get("qq") or "").strip()
+        if not qq or qq == bot_qq:
+            continue
+        if qq in (q for q, _ in out):
+            continue
+        out.append((qq, str(data.get("name") or "").strip()))
+    return out
+
+
+def _fmt_mentions(mentions):
+    """[(qq, 名字)] -> "Claude(3072662368)、Α(2840771765)"；没解析出名字就只写 QQ 号"""
+    parts = []
+    for qq, name in (mentions or []):
+        qq = str(qq or "").strip()
+        if not qq:
+            continue
+        name = (name or "").strip()
+        parts.append(f"{name}({qq})" if name else qq)
+    return "、".join(parts)
+
+
+def _text_with_mentions(text, mentions):
+    """把「@ 了谁」写进正文 —— 历史记录与模型提示都要看得见这句是说给谁的。
+    没有 @ 别人时原样返回（绝大多数消息走这条路，行为与改动前一致）。"""
+    label = _fmt_mentions(mentions)
+    if not label:
+        return text
+    return f"（@了 {label}）{text}" if text else f"（@了 {label}）"
+
+
+_member_name_cache = {}          # (群号, qq) -> (名字, 时间戳)
+_member_name_lock = threading.Lock()
+_MEMBER_NAME_TTL = 1800
+
+
+def _resolve_person_name(qq, event=None):
+    """给一个 QQ 找可用称呼：wordlib 自设昵称 → 群名片/昵称 → 陌生人昵称 → u<qq> 兜底。
+
+    只在 AI worker 线程里调用（可能发一次 NapCat 查询），失败一律返回 "u<qq>"，绝不抛。
+    """
+    qq = str(qq or "").strip()
+    if not qq:
+        return ""
+    try:
+        nick = get_nickname(qq)                     # data/user_data.json（wordlib 的昵称）
+        if nick:
+            return nick
+    except Exception:
+        pass
+    gid = str((event or {}).get("group_id") or "")
+    key = (gid, qq)
+    now = time.time()
+    with _member_name_lock:
+        cached = _member_name_cache.get(key)
+        if cached and now - cached[1] < _MEMBER_NAME_TTL:
+            return cached[0]
+    name = ""
+    try:
+        from utils.api import http_get
+        if gid:
+            d = (http_get("get_group_member_info",
+                          {"group_id": int(gid), "user_id": int(qq)}) or {}).get("data") or {}
+            name = (d.get("card") or d.get("nickname") or "").strip()
+        if not name:
+            d = (http_get("get_stranger_info", {"user_id": int(qq)}) or {}).get("data") or {}
+            name = (d.get("nickname") or d.get("nick") or "").strip()
+    except Exception:
+        name = ""
+    with _member_name_lock:
+        _member_name_cache[key] = (name, now)
+    return name
+
 def download_image_as_base64(url):
     try:
         resp = requests.get(url, timeout=10)
@@ -1554,7 +1641,8 @@ def _supplement_instructions():
     return _SUPPLEMENT_PSEUDO if mode == "pseudo" else _SUPPLEMENT_NORMAL
 
 
-def build_system_prompt(user_id=None, event=None, additional_user_ids=None, context=None):
+def build_system_prompt(user_id=None, event=None, additional_user_ids=None, context=None,
+                        trigger=None, mentions=None, prev_name=None):
     """构建系统提示（分层人设）：
     第一层：默认人设 —— 仅传递核心关键信息（身份/基础风格/图片评论/安全兜底），保障基础运行功能；
     第二层：自定义人格 —— user_persona / persona 存在时启用，并指示 AI 在此基础上做「深度人格特征判定」，
@@ -1619,11 +1707,18 @@ def build_system_prompt(user_id=None, event=None, additional_user_ids=None, cont
         sender = event.get("sender", {})
         nick = sender.get("card") or sender.get("nickname") or ""
     nick = (nick or "").strip()
-    combined += "\n\n" + _participants_block(context, user_id, nick)
+    combined += "\n\n" + _participants_block(context, user_id, nick,
+                                             extra_people=mentions, trigger=trigger)
 
     # ===== 系统补充指令（硬编码：群聊伪装/输出规范，非人格层）——放在 system prompt 最后 =====
     # 不可通过配置修改，保障行为规范稳定
     combined += "\n\n[系统补充指令]\n" + _supplement_instructions()
+
+    # ===== 本次触发方式（放在最末 = 离生成最近，权重最高）=====
+    # 随机接话时"没人叫你"，不说清楚模型就会把别人之间的对话当成在问自己
+    _trigger_hint = _trigger_block(trigger, nick, mentions, prev_name)
+    if _trigger_hint:
+        combined += "\n\n" + _trigger_hint
 
     combined = combined.replace("[nick]", nick or "对方")
     return combined
@@ -1632,11 +1727,15 @@ def build_system_prompt(user_id=None, event=None, additional_user_ids=None, cont
 _PARTICIPANT_RE = re.compile(r"^([^()\n]{1,24}?)\((\d{5,12})\)\s*[:：]")
 
 
-def _participants_block(context, current_uid, current_name):
+def _participants_block(context, current_uid, current_name, extra_people=None, trigger=None):
     """从上下文前缀里还原「本次对话参与者」，拼成名单 + 称呼规则。
 
     名单是模型唯一被允许用来称呼人的依据；这样它不必从聊天流里猜名字，
     也不会把人设里的"主人/星汐"套到别人身上。
+
+    extra_people：本条消息 @ 到的人 [(qq, 名字)]。他们可能还没在这个群发过言
+    （不在上下文里），但模型必须认得出「这句话是说给谁的」，所以补进名单。
+    trigger：触发方式。随机接话时"没人跟你说话"，称呼规则第 1 条不能再说成有人在找你。
     """
     try:
         masters = get_config("MASTER_QQ", []) or []
@@ -1651,8 +1750,23 @@ def _participants_block(context, current_uid, current_name):
         m = _PARTICIPANT_RE.match((rec.get("content") or "").strip())
         if m:
             seen[m.group(2)] = m.group(1).strip()
+
+    mentioned = set()              # 本条被 @ 的人（区别于上下文里出现过的人）
+    for qq, name in (extra_people or []):
+        qq = str(qq or "").strip()
+        if not qq:
+            continue
+        name = (name or "").strip()
+        if name and name.startswith("u") and name[1:] == qq:
+            name = ""              # 解析失败的占位符，别当成真名字
+        mentioned.add(qq)
+        seen.setdefault(qq, name)
+        if name and not seen.get(qq):
+            seen[qq] = name
+
     if current_uid:
         seen[str(current_uid)] = current_name or seen.get(str(current_uid), "")
+        mentioned.discard(str(current_uid))
 
     if not seen:
         return ""
@@ -1662,21 +1776,137 @@ def _participants_block(context, current_uid, current_name):
         line = f"- {name or '（未设置昵称）'}({qq})"
         if qq in masters:
             line += "（主人）"
+        if qq in mentioned:
+            line += "（本条消息 @ 的是这个人）"
         custom = get_nickname(qq)
         if custom and name and custom != name:
             line += f"（他自设的昵称：{custom}）"
         lines.append(line)
 
+    if str(trigger or "") == "random":
+        rule1 = ("1. 这次**没有人**在跟你说话：上面的「" + (current_name or "对方") +
+                 "」只是群里最后一条消息的发言人，不是你正在对话的人。"
+                 "要插话就自己插一句，不要当成有人找你有事。\n")
+    else:
+        rule1 = ("1. 这次跟你说话的人是「" + (current_name or "对方") +
+                 "」。要称呼谁，就用那个人在名单里的名字。\n")
+
     rules = (
         "[本次对话参与者]\n" + "\n".join(lines) + "\n"
         "[称呼规则]\n"
-        "1. 这次跟你说话的人是「" + (current_name or "对方") + "」。要称呼谁，就用那个人在名单里的名字。\n"
+        + rule1 +
         "2. 不要给名单外的人起名字，也不要凭印象编造名字；不确定就直接说\"你\"或写出对方的QQ号。\n"
         "3. 名单里的写法就是标准写法：不要改字、不要加\"小/老\"、不要翻译成别的说法。\n"
         "4. 人设里的人名（例如主人\"星汐\"）只能用在名单里标注「主人」的那个人身上，对其他人绝对不要用。\n"
         "5. 同一个人在本群有群名片、又有自设昵称时，名单里已经并列标出，两者指同一人。"
     )
     return rules
+
+
+_recent_speakers = {}            # 会话 -> deque[(qq, 名字, 时间戳)]：只记"谁在说话"，不记内容
+_recent_speakers_lock = threading.Lock()
+
+
+def _remember_speaker(event):
+    """记下「这句是谁说的」（不记内容、不进 AI 上下文、不落盘）。
+
+    为什么需要：群聊的消息默认只有"触发了机器人的"才进历史，别人之间的对话留不下，
+    于是「上一条是谁说的」查不到 —— 而这恰恰是没有 @ 时判断对话对象最靠谱的线索。
+    """
+    try:
+        if event.get("message_type") != "group":
+            return
+        uid = str(event.get("user_id") or "")
+        if not uid:
+            return
+        sender = event.get("sender") or {}
+        name = (sender.get("card") or sender.get("nickname") or "").strip()
+        key = get_session_key(event)
+        with _recent_speakers_lock:
+            buf = _recent_speakers.get(key)
+            if buf is None:
+                import collections
+                buf = collections.deque(maxlen=8)
+                _recent_speakers[key] = buf
+            buf.append((uid, name, time.time()))
+    except Exception:
+        pass
+
+
+def _previous_speaker(event, current_uid, window=120):
+    """这条消息之前最后一条**别人**的消息是谁说的：返回 (qq, 名字) 或 None。
+
+    线上 21:01 的真实一例：Α 说「好无聊」，紧接着 Claude 说「无聊就去睡嘛」——
+    这句是 Claude 在回 Α，机器人却当成在跟自己说，回了「才不无聊呢」。
+    """
+    try:
+        key = get_session_key(event)
+        with _recent_speakers_lock:
+            buf = list(_recent_speakers.get(key) or [])
+        now = time.time()
+        cur = str(current_uid or "")
+        for uid, name, ts in reversed(buf):
+            if uid == cur:
+                continue
+            if now - float(ts) > window:
+                return None
+            return uid, name
+        return None
+    except Exception:
+        return None
+
+
+def _trigger_block(trigger, current_name, mentions, prev_name=None):
+    """「这条消息为什么会被你看到 / 是不是在跟你说话」。
+
+    随机接话是最容易认错对象的一档：没人叫它，它却把别人之间的对话当成在问自己
+    （线上实例：Claude 在安慰 Echo「抱着睡一觉就好嘛」，它回「才不要让Claude抱呢」）。
+    这段放在 system prompt 最末尾（离生成最近），压过上面的分段/艾特规则。
+    """
+    trigger = (trigger or "").strip()
+    if not trigger:
+        return ""
+    name = (current_name or "对方").strip()
+    label = _fmt_mentions(mentions)
+    prev_name = (prev_name or "").strip()
+    if trigger == "random":
+        who = (f"这条 @ 的是「{label}」，不是在叫你。" if label
+               else "它的对象是群里随便哪个人，不是你。")
+        block = (
+            "[本次触发：随机接话 —— 你自己凑过去的]\n"
+            f"这条消息**没有人在对你说话**：没有人 @ 你，也没有人回复你。它是「{name}」在群里说的一句话，{who}\n"
+            "所以：\n"
+            "1. 不要把它当成有人在问你问题，也不要显得在专门回答它。\n"
+            "2. 你要做的是像群友那样随口插一句：评论、吐槽、附和，或顺着话题开个新话头。\n"
+            "3. 如果这条明显在对别人说（@ 了人、或在回答别人），不要替那个人回复，也不要冒充那个人。\n"
+            "4. 想对着某个人说话，就用名单里的名字或 [@QQ]；不确定就谁都不叫，说一句你自己的看法。\n"
+            "5. 插不上话也可以只发一句很短的或一个表情，别硬聊。"
+        )
+        if prev_name:
+            block += (f"\n（补充：这条紧跟在「{prev_name}」的话后面，"
+                      f"多半是{name}在接{prev_name}的话，不是在跟你说话。）")
+        return block
+    heads = {
+        "at": f"[本次触发：{name} @ 了你]",
+        "wake": f"[本次触发：{name} 在消息里叫了你的名字]",
+        "reply": f"[本次触发：{name} 回复了你的消息]",
+        "followup": f"[本次触发：续接 —— 刚才跟你聊的就是 {name}，他现在接着说]",
+        "private": "[本次触发：私聊]",
+    }
+    head = heads.get(trigger, "")
+    if not head:
+        return ""
+    if label:
+        head += (f"\n（注意：这条消息同时 @ 了「{label}」。要回应的是 @ 你的这个人；"
+                 f"确实是对 {label} 说话时，用他的名字或 [@QQ]。）")
+    if prev_name and label:
+        # 同时 @ 了别人 → 更可能是在跟那个人说话
+        head += f"\n（另外：它紧跟在「{prev_name}」后面并 @ 了 {label}，先按「他们在互相说话」来理解。）"
+    elif prev_name and trigger == "followup":
+        # 续接最容易误判：紧接着的这条可能是在回上一个人，不是在接你的话
+        head += (f"\n（注意：这条紧跟在「{prev_name}」之后。如果它其实是在接{prev_name}的话，"
+                 f"就别当成在跟你说；拿不准就轻描淡写带一句，别顺着「他在要求你」去想。）")
+    return head
 
 def _parse_model_chain():
     """低价备选型号（同一条中转、同一个 key），按配置顺序尝试。
@@ -1731,7 +1961,8 @@ def _targets():
     return out
 
 
-def call_ai(prompt, context, images, user_id=None, event=None):
+def call_ai(prompt, context, images, user_id=None, event=None, trigger=None, mentions=None,
+            prev_name=None):
     """调用 AI API，带自动容错：主模型 → 低价备选型号链 → 另一个槽位（都失败返回 None）"""
     global _active_model, _primary_fail_time
     primary = CONFIG.get("current_model", "gemini")
@@ -1755,7 +1986,9 @@ def call_ai(prompt, context, images, user_id=None, event=None):
         try:
             system_prompt = build_system_prompt(user_id=user_id, event=event,
                                                 additional_user_ids=list(additional_ids),
-                                                context=context)
+                                                context=context,
+                                                trigger=trigger, mentions=mentions,
+                                                prev_name=prev_name)
             messages = [{"role": "system", "content": system_prompt}]
             messages.extend(context)
 
@@ -2153,6 +2386,9 @@ def handle(event):
     text = extract_text(event)
     images = extract_images(event)
     user_id = event.get("user_id", 0)
+    # 本条 @ 了谁（排除机器人自己）：extract_text 只拼 text 段，at 段会整个丢掉，
+    # 于是「@张三 你还不睡啊」到模型那里只剩「还不睡啊」→ 它以为是在问自己。
+    mentions = extract_mentions(event)
 
     # 不响应机器人自己发出的消息（优先使用 event.self_id）
     self_id = str(event.get("self_id", get_config("BOT_QQ", 0)))
@@ -2189,11 +2425,15 @@ def handle(event):
         _log('info', f'忽略本部署另一个 bot 的私聊: user_id={user_id}')
         return False
 
+    # 记下"这句是谁说的"（不记内容）：判断「上一条是谁」只用它，不进 AI 上下文
+    _remember_speaker(event)
+
     # ===== 触发判定（按对话模式）=====
     #   普通模式：被 @ 、或消息里出现机器人名字（唤醒词）
     #   伪人模式：普通模式 + 「有人回复机器人」+ 「随机接话」
     mode = (CONFIG.get("chat_mode") or "normal").strip().lower()
     triggered = False
+    trigger_kind = ""          # 为什么回：private / at / wake / reply / random / followup
     bot_name = CONFIG.get("bot_name", get_bot_name())
     has_image = len(images) > 0
 
@@ -2210,35 +2450,43 @@ def handle(event):
             _acc_hit = False
     if msg_type == "private":
         triggered = True  # 私聊默认直接对话，无需 @ 或提及名字
+        trigger_kind = "private"
         print("[AI对话] 私聊触发")
     elif is_at_me(event):
         print("[AI对话] 被 @ 触发")
         triggered = True
+        trigger_kind = "at"
     elif text and bot_name in text and _peer_bot:
         print(f"[AI对话] 忽略本部署 bot 的唤醒词（防互触发）: {text[:24]}")
     elif text and bot_name in text:
         print(f"[AI对话] 唤醒词触发: {text}")
         triggered = True
+        trigger_kind = "wake"
     elif mode == "pseudo" and _is_reply_to_me(event):
         print("[AI对话] 被回复触发（伪人模式）")
         triggered = True
+        trigger_kind = "reply"
     elif mode == "pseudo" and not _peer_bot and _acc_hit:
         print(f"[AI对话] 随机接话命中（累积到 {CONFIG.get('random_reply_acc_threshold')}）: {(text or '')[:24]}")
         triggered = True
+        trigger_kind = "random"
     elif not _peer_bot and _is_followup(event):
         print(f"[AI对话] 续接触发（刚回过的同一个人）: {text[:24] if text else ''}")
         triggered = True
+        trigger_kind = "followup"
 
     if not triggered:
         # 非触发消息：私聊全部记录；群聊默认仅记录与机器人相关的消息（回复/提及），
         # 避免无关闲聊污染 AI 上下文（可通过 record_group_unrelated 开启全记录）
         if msg_type == "group" and not is_reply_to_me(event) and not CONFIG.get("record_group_unrelated", False):
             return False
-        add_to_history(event, "user", text or "[图片]", triggered=triggered, has_image=has_image, user_id=user_id)
+        add_to_history(event, "user", _text_with_mentions(text or "[图片]", mentions),
+                       triggered=triggered, has_image=has_image, user_id=user_id)
         return False
 
     if random.random() > CONFIG.get("reply_probability", 1.0):
-        add_to_history(event, "user", text or "[图片]", triggered=triggered, has_image=has_image, user_id=user_id)
+        add_to_history(event, "user", _text_with_mentions(text or "[图片]", mentions),
+                       triggered=triggered, has_image=has_image, user_id=user_id)
         return False
 
     clean_text = re.sub(r'@\S+\s*', '', text).strip() if text else ""
@@ -2255,7 +2503,7 @@ def handle(event):
     session_key = get_session_key(event)
     _ensure_session_worker(session_key)
     _session_workers[session_key]["q"].put(
-        (event, text, clean_text, images, user_id, has_image)
+        (event, text, clean_text, images, user_id, has_image, trigger_kind, mentions)
     )
     return True
 
@@ -2288,13 +2536,23 @@ def _ensure_session_worker(session_key):
         return _session_workers[session_key]
 
 
-def _process_ai_item(event, text, clean_text, images, user_id, has_image):
-    """worker 内串行处理一条触发消息：取上下文(不含本条) → 记历史 → AI → 回复"""
+def _process_ai_item(event, text, clean_text, images, user_id, has_image,
+                     trigger_kind="", mentions=None):
+    """worker 内串行处理一条触发消息：取上下文(不含本条) → 记历史 → AI → 回复
+
+    trigger_kind / mentions 决定模型看到的「这条是谁对谁说的」——
+    随机接话认错对象就是缺了这一层（放在 worker 里解析名字，主消息循环不碰网络）。
+    """
     try:
+        mentions = list(mentions or [])
+        if mentions:
+            # at 段自带 name 就用它，否则在这里查一次（worker 线程，有缓存）
+            mentions = [(qq, name or _resolve_person_name(qq, event)) for qq, name in mentions]
+
         # 此刻该会话历史尚未包含本条（触发消息统一在 worker 内按 FIFO 记录）
         context = get_context_for_ai(event)
-        add_to_history(event, "user", text or "[图片]", triggered=True,
-                       has_image=has_image, user_id=user_id)
+        add_to_history(event, "user", _text_with_mentions(text or "[图片]", mentions),
+                       triggered=True, has_image=has_image, user_id=user_id)
 
         if clean_text and user_id:
             extract_memory_from_interaction(user_id, clean_text)
@@ -2304,11 +2562,35 @@ def _process_ai_item(event, text, clean_text, images, user_id, has_image):
         _user_text = clean_text
         if quoted:
             print(f"[AI对话] 引用消息: {quoted['name']}({quoted['qq']}): {quoted['text'][:40]}")
+            _extra = ""
+            if trigger_kind == "random" and str(quoted.get("qq")) != str(event.get("self_id", "")):
+                # 随机接话时，这条是在回复别人 → 更不能当成在跟自己说话
+                _extra = (f"（另外：这条消息是在回复「{quoted['name']}({quoted['qq']})」的旧消息，"
+                          f"是在跟那个人说话，不是对你说的）\n")
             _user_text = (f"[引用的消息] {quoted['name']}({quoted['qq']}): {quoted['text']}\n"
                           f"（上一行是对方这次回复引用的旧消息，不是他现在说的话）\n"
+                          f"{_extra}"
                           f"{clean_text}")
+        if mentions:
+            _label = _fmt_mentions(mentions)
+            print(f"[AI对话] 本条 @ 了: {_label}（触发方式: {trigger_kind or '-'}）")
+            _user_text = (f"（这条消息 @ 了 {_label}，是对他们说的，不是对你说的）\n" + _user_text
+                          if trigger_kind == "random"
+                          else f"（这条消息 @ 了 {_label}）\n" + _user_text)
 
-        response, error = call_ai(_user_text, context, images, user_id=user_id, event=event)
+        # 上一条是别人说的？"很可能是在回他"——没有 @ 时最靠谱的线索
+        prev_name = ""
+        if trigger_kind in ("random", "followup", "reply", "wake"):
+            _prev = _previous_speaker(event, user_id)
+            if _prev:
+                _prev_uid, _prev_nm = _prev
+                if str(_prev_uid) not in [str(q) for q, _ in mentions]:
+                    prev_name = _prev_nm or _resolve_person_name(_prev_uid, event)
+                    if prev_name:
+                        print(f"[AI对话] 上一条是 {prev_name}({_prev_uid}) 说的")
+
+        response, error = call_ai(_user_text, context, images, user_id=user_id, event=event,
+                                  trigger=trigger_kind, mentions=mentions, prev_name=prev_name)
         if error:
             print(f"[AI对话] {error}")
             _notify_master(f"AI 调用失败（{get_session_key(event)}）：{error}", key=get_session_key(event))
@@ -2330,7 +2612,14 @@ def _process_ai_item(event, text, clean_text, images, user_id, has_image):
 
         parts = split_msg(response)
         session_key = get_session_key(event)
-        _mark_replied(event, user_id)          # 刷新续接窗口：接下来这个人的话继续回
+        # 刷新续接窗口：接下来这个人的话继续回。
+        # 但**随机接话不算**——那是自己插一句，不是跟他建立了对话；
+        # 否则线上踩过：随机插话后，对方下一句明明是回别人的（「无聊就去睡嘛」回 Α），
+        # 机器人却当成在跟自己说，接着答「才不无聊呢」= 认错对象。
+        if trigger_kind == "random":
+            print("[AI对话] 随机接话不续接（不把别人的对话当成跟自己在聊）")
+        else:
+            _mark_replied(event, user_id)
         budget = {"left": int(CONFIG.get("sticker_max_per_reply", 1) or 0)}
         for i, part in enumerate(parts):
             if i > 0:
