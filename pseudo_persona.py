@@ -151,7 +151,7 @@ __config_schema__ = {
     },
     "random_reply_acc_threshold": {
         "type": "number", "label": "累积触发阈值", "group": "参数",
-        "path": "random_reply_acc_threshold", "min": 0.1, "max": 20, "step": 0.1, "unit": "点",
+        "path": "random_reply_acc_threshold", "min": 0.05, "max": 20, "step": 0.05, "unit": "点",
         "help": "累计到这个值就主动插一句，然后归零重新累积（咸鱼的阈值是 1.0）",
         "default": 1.0,
     },
