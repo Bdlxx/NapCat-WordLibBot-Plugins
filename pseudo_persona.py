@@ -2087,19 +2087,25 @@ def handle(event):
     bot_name = CONFIG.get("bot_name", get_bot_name())
     has_image = len(images) > 0
 
+    # 群聊里另一个"本部署的 bot"发的消息：**不给唤醒词和随机接话**。
+    # 否则两个 bot 会互相点名死循环（2026-10-31 实测：40 秒互相刷了 9+ 条，烧 AI 配额）。
+    # 明确 @ 我、或回复我的消息仍然算（那是显式意图，也方便测试联动）。
+    _peer_bot = (msg_type == "group" and _is_own_bot(user_id))
     if msg_type == "private":
         triggered = True  # 私聊默认直接对话，无需 @ 或提及名字
         print("[AI对话] 私聊触发")
     elif is_at_me(event):
         print("[AI对话] 被 @ 触发")
         triggered = True
+    elif text and bot_name in text and _peer_bot:
+        print(f"[AI对话] 忽略本部署 bot 的唤醒词（防互触发）: {text[:24]}")
     elif text and bot_name in text:
         print(f"[AI对话] 唤醒词触发: {text}")
         triggered = True
     elif mode == "pseudo" and _is_reply_to_me(event):
         print("[AI对话] 被回复触发（伪人模式）")
         triggered = True
-    elif mode == "pseudo" and _random_reply_hit(event, text, images):
+    elif mode == "pseudo" and not _peer_bot and _random_reply_hit(event, text, images):
         print(f"[AI对话] 随机接话命中（伪人模式）: {text[:24]}")
         triggered = True
 
