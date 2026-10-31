@@ -70,7 +70,8 @@ __config_schema__ = {
         "path": "chat_mode",
         "options": [{"value": "normal", "label": "普通模式（只认 @ 与唤醒词）"},
                     {"value": "pseudo", "label": "伪人模式（普通模式 + 被回复触发 + 随机接话）"}],
-        "help": "普通模式：被 @ 或消息里出现机器人名字才回；伪人模式：额外允许「有人回复机器人」和「随机接话」两种触发。只影响触发与提示词，不影响表情包/语音能力",
+        "help": "普通模式：被 @ 或消息里出现机器人名字才回；伪人模式：额外允许「有人回复机器人」+「随机接话（浮点累积）」两种触发。"
+                "两种模式都带「续接窗口」（刚回过的人接着说也会回）。只影响触发与提示词，不影响表情包/语音能力",
         "default": "normal",
     },
     "enabled": {
@@ -87,7 +88,7 @@ __config_schema__ = {
     },
     "record_group_unrelated": {
         "type": "bool", "label": "记录无关群消息", "group": "参数",
-        "path": "record_group_unrelated",
+        "path": "record_group_unrelated", "default": False,
         "help": "群聊里是否也把与机器人无关的消息记进上下文（False 仅记录回复/被@的，避免污染上下文）",
     },
     "max_history": {
@@ -156,16 +157,10 @@ __config_schema__ = {
         "default": 1.0,
     },
     "random_reply_probability": {
-        "type": "number", "label": "随机接话开关", "group": "参数", "advanced": True,
-        "path": "random_reply_probability", "min": 0, "max": 1, "step": 1, "unit": "0/1",
-        "help": "0=关闭随机接话，1=开启（咸鱼那栏「伪人概率」填的也是 0 或 1）",
-        "default": 1.0,
-    },
-    "random_reply_cooldown_sec": {
-        "type": "number", "label": "随机接话冷却", "group": "参数", "advanced": True,
-        "path": "random_reply_cooldown_sec", "min": 0, "max": 3600, "step": 10, "unit": "秒",
-        "help": "同一会话两次随机接话的最小间隔，防止刷屏",
-        "default": 120,
+        "type": "bool", "label": "随机接话开关", "group": "参数",
+        "path": "random_reply_probability",
+        "help": "关闭后伪人模式也不再主动插话（只响应 @ / 唤醒词 / 被回复 / 续接窗口）",
+        "default": True,
     },
     "followup_window_sec": {
         "type": "number", "label": "续接窗口", "group": "参数",
@@ -191,7 +186,8 @@ __config_schema__ = {
     "bot_name": {
         "type": "text", "label": "机器人名（AI 视角）", "group": "人设",
         "path": "bot_name",
-        "help": "AI 眼里的机器人名；留空则取实例 config.json 的 BOT_NAME（当前配置文件里没有这一项）",
+        "help": "AI 眼里的机器人名字，同时也是唤醒词（消息里出现它就算叫了机器人）；留空则用实例 config.json 的 BOT_NAME",
+        "default": "依星",
     },
 
     # ---------------- 指令（commands.*）----------------
@@ -269,13 +265,13 @@ __config_schema__ = {
     # ---------------- 回复模板（messages.*）----------------
     "msg_switch_glm": {
         "type": "text", "label": "切换 GLM 成功", "group": "回复模板",
-        "path": "messages.switch_glm", "help": "无占位符",
-        "default": "已切换到 GLM-4V-Flash",
+        "path": "messages.switch_glm", "help": "可用占位符：{model}=实际切换到的型号",
+        "default": "已切换到 {model}",
     },
     "msg_switch_gemini": {
         "type": "text", "label": "切换 Gemini 成功", "group": "回复模板",
-        "path": "messages.switch_gemini", "help": "无占位符",
-        "default": "已切换到 Gemini 2.5 Flash",
+        "path": "messages.switch_gemini", "help": "可用占位符：{model}=实际切换到的型号",
+        "default": "已切换到 {model}",
     },
     "msg_current_model": {
         "type": "text", "label": "当前模型回复", "group": "回复模板",
@@ -411,10 +407,9 @@ __config_schema__ = {
         "default": {"开启伪人": "开启伪人", "关闭伪人": "关闭伪人", "切换glm": "切换GLM模型", "用glm": "切换GLM模型", "切换gemini": "切换Gemini模型", "用gemini": "切换Gemini模型", "当前模型": "查看当前模型", "用什么模型": "查看当前模型", "清除历史": "清除会话历史", "清空历史": "清除会话历史", "清空记忆": "清除会话历史", "清除所有历史": "清除所有历史", "清空所有历史": "清除所有历史", "清空所有记忆": "清除所有历史"},
     },
     "_note": {
-        "type": "textarea", "label": "文件说明（只读）", "group": "其它",
-        "path": "_note", "advanced": True, "readonly": True, "rows": 3,
-        "help": "配置文件里的备注行，插件只透传不读取；只读，避免误改",
-        "default": "伪人AI插件配置：current_model=当前模型(glm/gemini)，glm/gemini=模型API配置(api_url/api_key/model)，messages=回复模板，persona=AI人设提示词，其他=功能参数",
+        "type": "textarea", "label": "配置说明（只读）", "group": "其它",
+        "path": "_note", "advanced": True, "readonly": True, "rows": 8,
+        "default": "伪人AI对话插件配置速查：\n· chat_mode 普通/伪人：普通只认 @ 与唤醒词；伪人再加「被回复触发」和「随机接话」\n· 随机接话＝浮点累积器：每条真人消息累加 0~random_reply_acc_max，满 random_reply_acc_threshold 插一句并归零\n· followup_window_sec 续接窗口：刚回过的人接着说也会回（没 @ 也行），每次回复刷新\n· reply_probability 是「被触发后真的回」的概率（1=必回）\n· user_persona 是人设（每个实例各写各的，别互相拷），default_persona 是兜底\n· 表情包/语音：sticker_* / tts_*（语音内容禁止颜文字）；command_labels 启动时自动生成",
     },
 }
 
@@ -1053,8 +1048,7 @@ CONFIG = {
 
     # 触发配置（random_* 只在伪人模式生效）
     "reply_probability": 1.0,
-    "random_reply_probability": 0.05,
-    "random_reply_cooldown_sec": 120,
+    "random_reply_probability": True,          # 随机接话总开关（咸鱼那边填 0/1）
     # 随机接话（随机累积制，同咸鱼那套）：
     #   每来一条真人消息累加一个浮点（0 ~ random_reply_acc_max 的均匀随机），
     #   累计到 random_reply_acc_threshold 就插一句话、然后归零重新累积
@@ -1898,7 +1892,7 @@ def _cmd_switch_glm(event, raw, kw):
     with _model_lock:
         _active_model = None
         _primary_fail_time = 0
-    send_message(event, msg("switch_glm", "已切换到 GLM-4V-Flash"))
+    send_message(event, msg("switch_glm", "已切换到 {model}").format(model=_primary_model_name()))
     return True
 
 
@@ -1909,7 +1903,7 @@ def _cmd_switch_gemini(event, raw, kw):
     with _model_lock:
         _active_model = None
         _primary_fail_time = 0
-    send_message(event, msg("switch_gemini", "已切换到 Gemini 2.5 Flash"))
+    send_message(event, msg("switch_gemini", "已切换到 {model}").format(model=_primary_model_name()))
     return True
 
 
@@ -2074,8 +2068,6 @@ def _is_followup(event):
         return False
 
 
-_random_last = {}                     # 会话 -> 上次随机接话时间戳
-_random_lock = threading.Lock()
 
 
 _acc = {}                             # 会话 -> 已累积的浮点（咸鱼那套随机累积器）
@@ -2087,7 +2079,7 @@ def _bump_acc(event):
 
     咸鱼的做法：每条消息生成一个 random（0~1 浮点）存进记录，累加（.sum）到 1 就发言并重新累积。
     """
-    if float(CONFIG.get("random_reply_probability", 1.0) or 0) <= 0:   # 0=关闭
+    if not CONFIG.get("random_reply_probability", True):   # 开关关掉就完全不累积
         return False
     thr = float(CONFIG.get("random_reply_acc_threshold", 1.0) or 1.0)
     gain_max = float(CONFIG.get("random_reply_acc_max", 0.1) or 0.1)
@@ -2110,28 +2102,6 @@ def _reset_acc(event):
             _acc[get_session_key(event)] = 0.0
     except Exception:
         pass
-
-
-def _random_reply_hit(event, text, images):
-    """伪人模式下的随机接话判定：概率 + 同会话冷却；图片/表情包和过短消息不接。"""
-    p = float(CONFIG.get("random_reply_legacy_prob", 0) or 0)   # 旧的"每条消息掷骰子"通道，默认关闭
-    if p <= 0 or event.get("message_type") != "group":
-        return False
-    if images or not (text or "").strip():
-        return False
-    t = text.strip()
-    if len(t) < 2 or t.startswith("["):
-        return False
-    cooldown = float(CONFIG.get("random_reply_cooldown_sec", 120) or 0)
-    key = get_session_key(event)
-    now = time.time()
-    with _random_lock:
-        if cooldown > 0 and (now - float(_random_last.get(key) or 0)) < cooldown:
-            return False
-        if random.random() >= p:
-            return False
-        _random_last[key] = now
-    return True
 
 
 def handle(event):
@@ -2215,9 +2185,6 @@ def handle(event):
         triggered = True
     elif mode == "pseudo" and not _peer_bot and _acc_hit:
         print(f"[AI对话] 随机接话命中（累积到 {CONFIG.get('random_reply_acc_threshold')}）: {(text or '')[:24]}")
-        triggered = True
-    elif mode == "pseudo" and not _peer_bot and _random_reply_hit(event, text, images):
-        print(f"[AI对话] 随机接话命中（概率）: {text[:24]}")
         triggered = True
     elif not _peer_bot and _is_followup(event):
         print(f"[AI对话] 续接触发（刚回过的同一个人）: {text[:24] if text else ''}")
