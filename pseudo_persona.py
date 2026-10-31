@@ -690,16 +690,31 @@ def _voice_prompt():
         return "\n[语音权限=假]（你当前发不了语音，不要输出 [语音](…) 语法。）"
     limit = int(CONFIG.get("tts_max_chars", 40) or 40)
     return ("\n[语音权限=真]\n"
-            "想发语音时，单独写一句 [语音](要念出来的内容)。\n"
+            "想发语音时，单独写一句 [语音](要念出来的内容)，**圆括号不能省**：\n"
+            "   写法：[语音](真过分)   ← 方括号后面紧跟圆括号，圆括号里只放要念的字\n"
             "语音内容规则（必须遵守）：\n"
             "1. 语音里**只能有要念出来的字**，%d 字以内；\n"
-            "2. 语音里**绝对禁止颜文字、emoji、括号里的动作/情绪说明**：只留要念出来的字，\n"
-            "   像「真过分」这种不带颜文字的短句才是对的；带了颜文字或「（害羞）」这种旁白就是错的；\n"
+            "2. 语音里**绝对禁止颜文字、emoji、动作/情绪旁白**：只留要念出来的字；\n"
             "3. 不要标点堆叠（！！！→！），不要换行；\n"
             "4. 一次回复最多一条语音，语音单独成条，不要和其它内容挤在同一句里；\n"
-            "5. **颜文字、emoji 只放在文字消息里**（语音里一个都不要有）。"
+            "5. **颜文字、emoji 只放在文字消息里**（语音里一个都不要有）。\n"
+            "   注意：本条提示不提供现成颜文字，用哪个由你自己按情绪决定。" % limit)
 
-            "   注意：这里只是规则，本条提示里没有给你现成的颜文字可用——用哪个字由你自己按情绪决定。" % limit)
+
+def _voice_tail(text, k):
+    """[语音] 后面没跟圆括号时的兜底：把本行剩下的内容当成要念的话。
+
+    模型偶尔漏括号（线上 21:59：`[语音]星汐发给人家的是一张猫咪…`）——
+    只靠提示词管不住，解析这层必须能救回来，否则 "[语音]" 会当字面量发进群。
+    遇到换行 / [表情:…] / [@QQ] / 下一个 [语音] 就截断。返回 (content, end)。
+    """
+    rest = (text or "")[k:]
+    stop = len(rest)
+    for _sep in ("\n", "\r", "[表情:", "[@", "[语音]"):
+        _p = rest.find(_sep)
+        if 0 <= _p < stop:
+            stop = _p
+    return rest[:stop].strip(), k + stop
 
 
 def _split_voice_tokens(text):
@@ -716,12 +731,24 @@ def _split_voice_tokens(text):
             break
         k = j + len("[语音]")
         if k >= n or text[k] not in "(（：:":
-            i = j + len("[语音]")
+            # 模型偶尔会漏圆括号（线上 21:59 真实出现：`[语音]星汐发给人家的是一张…`）——
+            # 这时别把 "[语音]" 字面量当普通文字发进群里，把本行剩下的内容当作要念的话。
+            content, end = _voice_tail(text, k)
+            if content:
+                out.append((j, end, content))
+                i = end
+            else:
+                i = j + len("[语音]")
             continue
         if text[k] in "：:":
             k += 1
             if k >= n or text[k] not in "(（":
-                i = k
+                content, end = _voice_tail(text, k)     # `[语音]：内容` 这种也照此兜底
+                if content:
+                    out.append((j, end, content))
+                    i = end
+                else:
+                    i = k
                 continue
         k += 1                      # 跳过开括号（半角/全角）
         depth, start = 1, k
