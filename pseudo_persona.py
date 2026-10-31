@@ -192,13 +192,13 @@ __config_schema__ = {
 
     # ---------------- 指令（commands.*）----------------
     "cmd_enable": {
-        "type": "text", "label": "开启伪人", "group": "指令",
-        "path": "commands.enable", "default": "开启伪人",
+        "type": "text", "label": "开启 AI 对话", "group": "指令",
+        "path": "commands.enable", "default": "开启AI对话",
         "help": "触发词：后缀匹配，仅主人可用；群内=开本群，私聊=开全局",
     },
     "cmd_disable": {
-        "type": "text", "label": "关闭伪人", "group": "指令",
-        "path": "commands.disable", "default": "关闭伪人",
+        "type": "text", "label": "关闭 AI 对话", "group": "指令",
+        "path": "commands.disable", "default": "关闭AI对话",
         "help": "触发词：后缀匹配，仅主人可用；群内=关本群，私聊=关全局",
     },
     "cmd_mode_on": {
@@ -424,7 +424,7 @@ __config_schema__ = {
         "type": "json", "label": "指令标签映射", "group": "其它",
         "path": "command_labels", "advanced": True, "readonly": True, "rows": 8,
         "help": "插件启动时自动写入的「触发词 → 指令中文名」映射，供面板显示可读名称；只读",
-        "default": {"开启伪人": "开启伪人", "关闭伪人": "关闭伪人", "切换glm": "切换GLM模型", "用glm": "切换GLM模型", "切换gemini": "切换Gemini模型", "用gemini": "切换Gemini模型", "当前模型": "查看当前模型", "用什么模型": "查看当前模型", "清除历史": "清除会话历史", "清空历史": "清除会话历史", "清空记忆": "清除会话历史", "清除所有历史": "清除所有历史", "清空所有历史": "清除所有历史", "清空所有记忆": "清除所有历史"},
+        "default": {"开启AI对话": "开启AI对话", "关闭AI对话": "关闭AI对话", "切换glm": "切换GLM模型", "用glm": "切换GLM模型", "切换gemini": "切换Gemini模型", "用gemini": "切换Gemini模型", "当前模型": "查看当前模型", "用什么模型": "查看当前模型", "清除历史": "清除会话历史", "清空历史": "清除会话历史", "清空记忆": "清除会话历史", "清除所有历史": "清除所有历史", "清空所有历史": "清除所有历史", "清空所有记忆": "清除所有历史"},
     },
     "_note": {
         "type": "textarea", "label": "配置说明（只读）", "group": "其它",
@@ -1886,22 +1886,22 @@ registry = CommandRegistry("AI对话")
 def _cmd_enable(event, raw, kw):
     if event.get("message_type") == "group":
         _pt_set(event.get("group_id"), "pseudo", True)
-        send_message(event, "伪人已在本群开启")
+        send_message(event, "AI 对话已在本群开启")
     else:
         CONFIG["enabled"] = True
         save_config()
-        send_message(event, "伪人已开启")
+        send_message(event, "AI 对话已开启")
     return True
 
 
 def _cmd_disable(event, raw, kw):
     if event.get("message_type") == "group":
         _pt_set(event.get("group_id"), "pseudo", False)
-        send_message(event, "伪人已在本群关闭")
+        send_message(event, "AI 对话已在本群关闭")
     else:
         CONFIG["enabled"] = False
         save_config()
-        send_message(event, "伪人已关闭")
+        send_message(event, "AI 对话已关闭")
     return True
 
 
@@ -2009,8 +2009,8 @@ def _cmd_clear_all(event, raw, kw):
 # 注册指令：名称 / 触发词 / 描述 / 处理函数 / 权限 / 匹配方式
 registry.register("开启伪人（模式）", [cmd("mode_on", "开启伪人模式")], "把对话模式切到伪人模式（@/唤醒词/被回复/随机接话都会回）", _cmd_mode_pseudo, master_only=True)
 registry.register("关闭伪人（模式）", [cmd("mode_off", "关闭伪人模式")], "把对话模式切回普通模式（只认 @/唤醒词，仍保留续接窗口）", _cmd_mode_normal, master_only=True)
-registry.register("开启伪人", [cmd("enable", "开启伪人")], "开启伪人（群内=本群，私聊=全局）", _cmd_enable, master_only=True, kind="suffix")
-registry.register("关闭伪人", [cmd("disable", "关闭伪人")], "关闭伪人（群内=本群，私聊=全局）", _cmd_disable, master_only=True, kind="suffix")
+registry.register("开启AI对话", [cmd("enable", "开启AI对话")], "开启 AI 对话（群内=本群，私聊=全局）", _cmd_enable, master_only=True, kind="suffix")
+registry.register("关闭AI对话", [cmd("disable", "关闭AI对话")], "关闭 AI 对话（群内=本群，私聊=全局）", _cmd_disable, master_only=True, kind="suffix")
 registry.register("切换GLM模型", [cmd("switch_glm", "切换glm"), cmd("switch_glm_alt", "用glm")], "把 AI 模型切换为 GLM", _cmd_switch_glm, master_only=True)
 registry.register("切换Gemini模型", [cmd("switch_gemini", "切换gemini"), cmd("switch_gemini_alt", "用gemini")], "把 AI 模型切换为 Gemini", _cmd_switch_gemini, master_only=True)
 registry.register("查看当前模型", [cmd("current_model", "当前模型"), cmd("current_model_alt", "用什么模型")], "查看当前使用的 AI 模型", _cmd_current_model, master_only=True)
