@@ -155,6 +155,13 @@ __config_schema__ = {
         "help": "同一会话两次随机接话的最小间隔，防止刷屏",
         "default": 120,
     },
+    "followup_window_sec": {
+        "type": "number", "label": "续接窗口", "group": "参数",
+        "path": "followup_window_sec", "min": 0, "max": 1800, "step": 10, "unit": "秒",
+        "help": "机器人刚回过某人之后，这个人在该秒数内继续说的话，即使没 @ 也没叫名字也会继续回"
+                "（0=关闭）。每次回复都会把窗口往后刷新，所以能一直聊下去",
+        "default": 120,
+    },
 
     # ---------------- 人设 ----------------
     "default_persona": {
@@ -403,6 +410,12 @@ __config_schema__ = {
 import re
 import json
 import time
+import sys as _sys
+
+try:                      # 老插件里 print 是唯一的即时日志通道：改成行缓冲，避免错序/丢行
+    _sys.stdout.reconfigure(line_buffering=True)
+except Exception:
+    pass
 import random
 import requests
 import base64
@@ -1030,6 +1043,8 @@ CONFIG = {
     "reply_probability": 1.0,
     "random_reply_probability": 0.05,
     "random_reply_cooldown_sec": 120,
+    # 续接窗口：机器人刚回过某人后，这个人在 N 秒内再说的话不用 @/叫名字也继续回（0=关闭）
+    "followup_window_sec": 120,
     "record_group_unrelated": False,  # 群聊是否记录与机器人无关的消息（False 仅记录回复/提及，避免污染上下文）
     
     # 上下文配置
@@ -2007,6 +2022,39 @@ def _is_own_bot(user_id):
         return False
 
 
+_last_reply = {}                      # 会话 -> (上次回复的对象 uid, 时间戳)，用于"续接窗口"
+_last_reply_lock = threading.Lock()
+
+
+def _mark_replied(event, user_id):
+    """记下"刚回过谁"，续接窗口靠它"""
+    try:
+        with _last_reply_lock:
+            _last_reply[get_session_key(event)] = (str(user_id), time.time())
+    except Exception:
+        pass
+
+
+def _is_followup(event):
+    """续接窗口：上一次回复的就是这个人，且还在窗口内 → 这条也回（不用 @/叫名字）"""
+    if event.get("message_type") != "group":
+        return False
+    window = float(CONFIG.get("followup_window_sec", 120) or 0)
+    if window <= 0:
+        return False
+    try:
+        with _last_reply_lock:
+            rec = _last_reply.get(get_session_key(event))
+        if not rec:
+            return False
+        uid, ts = rec
+        if str(event.get("user_id")) != uid:
+            return False
+        return (time.time() - float(ts)) <= window
+    except Exception:
+        return False
+
+
 _random_last = {}                     # 会话 -> 上次随机接话时间戳
 _random_lock = threading.Lock()
 
@@ -2107,6 +2155,9 @@ def handle(event):
         triggered = True
     elif mode == "pseudo" and not _peer_bot and _random_reply_hit(event, text, images):
         print(f"[AI对话] 随机接话命中（伪人模式）: {text[:24]}")
+        triggered = True
+    elif not _peer_bot and _is_followup(event):
+        print(f"[AI对话] 续接触发（刚回过的同一个人）: {text[:24] if text else ''}")
         triggered = True
 
     if not triggered:
@@ -2210,6 +2261,7 @@ def _process_ai_item(event, text, clean_text, images, user_id, has_image):
 
         parts = split_msg(response)
         session_key = get_session_key(event)
+        _mark_replied(event, user_id)          # 刷新续接窗口：接下来这个人的话继续回
         budget = {"left": int(CONFIG.get("sticker_max_per_reply", 1) or 0)}
         for i, part in enumerate(parts):
             if i > 0:
