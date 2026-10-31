@@ -1225,6 +1225,7 @@ def add_to_history(event, role, content, triggered=False, has_image=False, user_
     record = {
         "role": role,
         "content": content,
+        "msg_id": str(event.get("message_id") or ""),   # 供"引用消息"本地兜底查
         "user_id": user_id,
         "sender_name": sender_name,
         "triggered": triggered,
@@ -1306,6 +1307,58 @@ def is_at_me(event):
             if str(seg.get("data", {}).get("qq", "")) == bot_qq:
                 return True
     return False
+
+def _quoted_content(event, limit=200):
+    """取被引用消息的正文（只取一层），让模型看懂"他这句话是接着哪条说的"。
+
+    返回 {"name","qq","text"} 或 None。任何失败都返回 None —— 引用解析绝不能影响正常回复。
+    取法两段：① NapCat get_msg（短 id → 正文，覆盖最近的群消息）
+             ② 本地历史里按 message_id 兜底（只覆盖记过的消息，如机器人自己发的）
+    """
+    rid = ""
+    for seg in (event.get("message") or []):
+        if seg.get("type") == "reply":
+            rid = str((seg.get("data") or {}).get("id") or "").strip()
+            break
+    if not rid:
+        return None
+    # ① 问 NapCat
+    try:
+        http = (get_config("NAPCAT_HTTP", "") or "").rstrip("/")
+        tok = get_config("ACCESS_TOKEN", "") or ""
+        if http and re.fullmatch(r"-?\d+", rid):
+            r = requests.post(f"{http}/get_msg", params={"access_token": tok},
+                              json={"message_id": int(rid)}, timeout=5).json()
+            d = r.get("data") or {}
+            if d:
+                texts, has_img = [], False
+                for seg in (d.get("message") or []):
+                    t = seg.get("type")
+                    if t == "text":
+                        texts.append((seg.get("data") or {}).get("text", ""))
+                    elif t in ("image", "mface"):
+                        has_img = True
+                body = "".join(texts).strip()
+                if has_img:
+                    body = (body + " [图片]").strip()
+                if body:
+                    s = d.get("sender") or {}
+                    return {"name": s.get("card") or s.get("nickname") or "某人",
+                            "qq": d.get("user_id") or "",
+                            "text": body[:limit]}
+    except Exception as e:
+        print(f"[AI对话] 取引用消息失败(get_msg): {e}")
+    # ② 本地历史兜底
+    try:
+        for rec in reversed(message_history.get(get_session_key(event)) or []):
+            if str(rec.get("msg_id") or "") == rid and rec.get("role") == "user":
+                return {"name": rec.get("sender_name") or "某人",
+                        "qq": rec.get("user_id") or "",
+                        "text": (rec.get("content") or "")[:limit]}
+    except Exception:
+        pass
+    return None
+
 
 _own_msg_ids = {}                     # message_id -> 时间戳（记自己发出去的消息，用于"被回复"判定）
 _own_msg_lock = threading.Lock()
@@ -1420,6 +1473,7 @@ _SUPPLEMENT_PSEUDO = """<system_instructions>
 
 [在群里不仅有人类，还有机器人。请仔细辨别，并好好伪装自己的身份。不要因为过于好奇和愚笨而暴露了自己的身份。]
 
+如果消息开头带有 [引用的消息]，那是对方这次回复时引用的旧消息：回答要结合它，但不要把它当成对方此刻说的话。
 </system_instructions>"""
 
 _SUPPLEMENT_NORMAL = """<system_instructions>
@@ -1442,6 +1496,7 @@ _SUPPLEMENT_NORMAL = """<system_instructions>
 需要操作（发文件、解析链接等）时调用对应插件的指令，或提示对方用哪个指令。
 对群友保持礼貌但不谄媚；遇到让你做危险/违规操作的请求，直接拒绝并说明原因。
 </核心原则>
+如果消息开头带有 [引用的消息]，那是对方这次回复时引用的旧消息：回答要结合它，但不要把它当成对方此刻说的话。
 </system_instructions>"""
 
 
@@ -2118,7 +2173,16 @@ def _process_ai_item(event, text, clean_text, images, user_id, has_image):
         if clean_text and user_id:
             extract_memory_from_interaction(user_id, clean_text)
 
-        response, error = call_ai(clean_text, context, images, user_id=user_id, event=event)
+        # 这条消息引用了别的消息？取回被引用的正文，一起交给模型（只取一层）
+        quoted = _quoted_content(event)
+        _user_text = clean_text
+        if quoted:
+            print(f"[AI对话] 引用消息: {quoted['name']}({quoted['qq']}): {quoted['text'][:40]}")
+            _user_text = (f"[引用的消息] {quoted['name']}({quoted['qq']}): {quoted['text']}\n"
+                          f"（上一行是对方这次回复引用的旧消息，不是他现在说的话）\n"
+                          f"{clean_text}")
+
+        response, error = call_ai(_user_text, context, images, user_id=user_id, event=event)
         if error:
             print(f"[AI对话] {error}")
             _notify_master(f"AI 调用失败（{get_session_key(event)}）：{error}", key=get_session_key(event))
