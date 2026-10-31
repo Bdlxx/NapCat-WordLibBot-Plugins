@@ -142,17 +142,23 @@ __config_schema__ = {
         "help": "主模型失败后多久探测一次、能否切回（源码下限 60 秒）",
         "default": 1800,
     },
-    "random_reply_points": {
-        "type": "number", "label": "随机接话点数", "group": "参数",
-        "path": "random_reply_points", "min": 0, "max": 500, "step": 5, "unit": "条",
-        "help": "**只在伪人模式生效**：群里每来一条真人的消息 +1 点，满这么多点就主动插一句话、然后清零"
-                "（0=关闭）。就是咸鱼插件里「触发点数」那套",
-        "default": 30,
+    "random_reply_acc_max": {
+        "type": "number", "label": "单条累积上限", "group": "参数",
+        "path": "random_reply_acc_max", "min": 0.01, "max": 1, "step": 0.01, "unit": "0~1",
+        "help": "**只在伪人模式生效**：每来一条真人消息，累加一个 0~该值 的随机浮点"
+                "（咸鱼就是「每条消息存一个 random，累加满 1 说话」）。越小越沉默",
+        "default": 0.1,
+    },
+    "random_reply_acc_threshold": {
+        "type": "number", "label": "累积触发阈值", "group": "参数",
+        "path": "random_reply_acc_threshold", "min": 0.1, "max": 20, "step": 0.1, "unit": "点",
+        "help": "累计到这个值就主动插一句，然后归零重新累积（咸鱼的阈值是 1.0）",
+        "default": 1.0,
     },
     "random_reply_probability": {
-        "type": "number", "label": "满点后插话概率", "group": "参数", "advanced": True,
-        "path": "random_reply_probability", "min": 0, "max": 1, "step": 0.1, "unit": "0~1",
-        "help": "点数满的时候，按这个概率决定这次插不插话（1=满点必插，0.5=有一半机会留到下一轮）",
+        "type": "number", "label": "随机接话开关", "group": "参数", "advanced": True,
+        "path": "random_reply_probability", "min": 0, "max": 1, "step": 1, "unit": "0/1",
+        "help": "0=关闭随机接话，1=开启（咸鱼那栏「伪人概率」填的也是 0 或 1）",
         "default": 1.0,
     },
     "random_reply_cooldown_sec": {
@@ -1049,10 +1055,12 @@ CONFIG = {
     "reply_probability": 1.0,
     "random_reply_probability": 0.05,
     "random_reply_cooldown_sec": 120,
-    # 随机接话（点数累积制，同咸鱼插件的「触发点数」）：
-    #   群里每来一条真人的消息 +1 点，满 random_reply_points 点就插一句（然后清零）
-    "random_reply_points": 30,
-    "random_reply_probability": 1.0,
+    # 随机接话（随机累积制，同咸鱼那套）：
+    #   每来一条真人消息累加一个浮点（0 ~ random_reply_acc_max 的均匀随机），
+    #   累计到 random_reply_acc_threshold 就插一句话、然后归零重新累积
+    "random_reply_acc_max": 0.1,
+    "random_reply_acc_threshold": 1.0,
+    "random_reply_probability": 1.0,          # 0=关闭随机接话 1=开启（咸鱼那边也是 0/1）
 
     # 续接窗口：机器人刚回过某人后，这个人在 N 秒内再说的话不用 @/叫名字也继续回（0=关闭）
     "followup_window_sec": 120,
@@ -2070,34 +2078,36 @@ _random_last = {}                     # 会话 -> 上次随机接话时间戳
 _random_lock = threading.Lock()
 
 
-_points = {}                          # 会话 -> 已累积点数（咸鱼那套「触发点数」）
-_points_lock = threading.Lock()
+_acc = {}                             # 会话 -> 已累积的浮点（咸鱼那套随机累积器）
+_acc_lock = threading.Lock()
 
 
-def _bump_points(event):
-    """真人群消息 +1 点；满 random_reply_points 时返回 True 并清零（相当于"聊够了，插一句"）"""
-    need = int(CONFIG.get("random_reply_points", 0) or 0)
-    if need <= 0:
+def _bump_acc(event):
+    """每条真人消息累加一个随机浮点；累计到阈值就返回 True 并归零（相当于"攒够了，插一句"）。
+
+    咸鱼的做法：每条消息生成一个 random（0~1 浮点）存进记录，累加（.sum）到 1 就发言并重新累积。
+    """
+    if float(CONFIG.get("random_reply_probability", 1.0) or 0) <= 0:   # 0=关闭
+        return False
+    thr = float(CONFIG.get("random_reply_acc_threshold", 1.0) or 1.0)
+    gain_max = float(CONFIG.get("random_reply_acc_max", 0.1) or 0.1)
+    if thr <= 0 or gain_max <= 0:
         return False
     key = get_session_key(event)
-    with _points_lock:
-        n = int(_points.get(key, 0)) + 1
-        if n < need:
-            _points[key] = n
+    gain = random.uniform(0, gain_max)
+    with _acc_lock:
+        cur = float(_acc.get(key, 0.0)) + gain
+        if cur < thr:
+            _acc[key] = cur
             return False
-        _points[key] = 0              # 满点清零（咸鱼：触发一次后重新攒）
-    prob = float(CONFIG.get("random_reply_probability", 1.0) or 0)
-    if random.random() >= prob:
-        with _points_lock:            # 这次没插：把点数留一半，下一轮更容易命中，别一直不吭声
-            _points[key] = max(1, need // 2)
-        return False
-    return True
+        _acc[key] = 0.0               # 触发后归零，重新累积
+        return True
 
 
-def _reset_points(event):
+def _reset_acc(event):
     try:
-        with _points_lock:
-            _points[get_session_key(event)] = 0
+        with _acc_lock:
+            _acc[get_session_key(event)] = 0.0
     except Exception:
         pass
 
@@ -2182,13 +2192,13 @@ def handle(event):
     # 否则两个 bot 会互相点名死循环（2026-10-31 实测：40 秒互相刷了 9+ 条，烧 AI 配额）。
     # 明确 @ 我、或回复我的消息仍然算（那是显式意图，也方便测试联动）。
     _peer_bot = (msg_type == "group" and _is_own_bot(user_id))
-    # 点数累积：所有真人的群消息都算（含 @ 别人的、图片），满点就插话
-    _pts_hit = False
+    # 随机累积：所有真人的群消息都参与累加（含 @ 别人的、图片），攒够阈值就插话
+    _acc_hit = False
     if msg_type == "group" and mode == "pseudo" and not _peer_bot and (text or images):
         try:
-            _pts_hit = _bump_points(event)
+            _acc_hit = _bump_acc(event)
         except Exception:
-            _pts_hit = False
+            _acc_hit = False
     if msg_type == "private":
         triggered = True  # 私聊默认直接对话，无需 @ 或提及名字
         print("[AI对话] 私聊触发")
@@ -2203,8 +2213,8 @@ def handle(event):
     elif mode == "pseudo" and _is_reply_to_me(event):
         print("[AI对话] 被回复触发（伪人模式）")
         triggered = True
-    elif mode == "pseudo" and not _peer_bot and _pts_hit:
-        print(f"[AI对话] 随机接话命中（点数满 {CONFIG.get('random_reply_points')}）: {(text or '')[:24]}")
+    elif mode == "pseudo" and not _peer_bot and _acc_hit:
+        print(f"[AI对话] 随机接话命中（累积到 {CONFIG.get('random_reply_acc_threshold')}）: {(text or '')[:24]}")
         triggered = True
     elif mode == "pseudo" and not _peer_bot and _random_reply_hit(event, text, images):
         print(f"[AI对话] 随机接话命中（概率）: {text[:24]}")
