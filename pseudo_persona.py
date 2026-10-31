@@ -6,10 +6,10 @@
 只有主人可以切换模型
 """
 # ========== 插件元数据（SDK 规范）==========
-__plugin_name_cn__ = "伪人插件"
-__plugin_name_en__ = "pseudo_persona"
-__plugin_version__ = "1.0.0"
-__plugin_desc__ = "AI 对话回复、角色扮演，支持 GLM 和 Gemini 双模型"
+__plugin_name_cn__ = "AI 对话插件"
+__plugin_name_en__ = "ai_chat"
+__plugin_version__ = "1.1.0"
+__plugin_desc__ = "AI 对话：普通/伪人两种模式（伪人=装群友混聊）、表情包/语音、随机接话"
 __plugin_author__ = "NapCat-WordLibBot"
 
 # ============================================================================
@@ -65,6 +65,14 @@ __config_schema__ = {
     },
 
     # ---------------- 参数 ----------------
+    "chat_mode": {
+        "type": "select", "label": "对话模式", "group": "参数",
+        "path": "chat_mode",
+        "options": [{"value": "normal", "label": "普通模式（只认 @ 与唤醒词）"},
+                    {"value": "pseudo", "label": "伪人模式（普通模式 + 被回复触发 + 随机接话）"}],
+        "help": "普通模式：被 @ 或消息里出现机器人名字才回；伪人模式：额外允许「有人回复机器人」和「随机接话」两种触发。只影响触发与提示词，不影响表情包/语音能力",
+        "default": "normal",
+    },
     "enabled": {
         "type": "bool", "label": "插件总开关", "group": "参数",
         "path": "enabled",
@@ -135,9 +143,17 @@ __config_schema__ = {
         "default": 1800,
     },
     "random_reply_probability": {
-        "type": "number", "label": "随机回复概率（未生效）", "group": "参数", "advanced": True,
-        "path": "random_reply_probability", "min": 0, "max": 1, "unit": "0~1",
-        "help": "文件里有此键但当前源码未读取（历史遗留），保留兼容",
+        "type": "number", "label": "随机接话概率", "group": "参数", "advanced": True,
+        "path": "random_reply_probability", "min": 0, "max": 0.5, "step": 0.05, "unit": "0~0.5",
+        "help": "**只在伪人模式生效**：群聊里没被 @、也没提机器人名时主动插话的概率（0.05=5%）。"
+                "图片/表情包和 2 字以下的消息不接。想更自然建议同时打开「记录无关群消息」",
+        "default": 0.05,
+    },
+    "random_reply_cooldown_sec": {
+        "type": "number", "label": "随机接话冷却", "group": "参数", "advanced": True,
+        "path": "random_reply_cooldown_sec", "min": 0, "max": 3600, "step": 10, "unit": "秒",
+        "help": "同一会话两次随机接话的最小间隔，防止刷屏",
+        "default": 120,
     },
 
     # ---------------- 人设 ----------------
@@ -443,10 +459,10 @@ def _load_stickers(force=False):
             if good:
                 tags[str(tag)] = good
     except Exception as e:
-        print(f"[伪人] 表情库读取失败: {e}")
+        print(f"[AI对话] 表情库读取失败: {e}")
         return _sticker_tags
     _sticker_tags, _sticker_mtime = tags, mtime
-    print(f"[伪人] 表情库就绪: {len(tags)} 个标签 / {sum(len(v) for v in tags.values())} 张")
+    print(f"[AI对话] 表情库就绪: {len(tags)} 个标签 / {sum(len(v) for v in tags.values())} 张")
     return tags
 
 
@@ -454,13 +470,13 @@ def _sticker_pick(tag, session_key):
     """按标签随机抽一张；同会话冷却期内直接放弃（返回 None），最近用过的排后面"""
     files = (_load_stickers() or {}).get(tag) or []
     if not files:
-        print(f"[伪人] 表情标签不存在: {tag}")
+        print(f"[AI对话] 表情标签不存在: {tag}")
         return None
     with _sticker_lock:
         st = _sticker_state.setdefault(session_key, {"last": 0.0, "recent": []})
         cool = float(CONFIG.get("sticker_cooldown_sec", 30) or 0)
         if cool > 0 and (time.time() - float(st.get("last") or 0)) < cool:
-            print(f"[伪人] 表情冷却中，跳过: {tag}")
+            print(f"[AI对话] 表情冷却中，跳过: {tag}")
             return None
         recent = st.get("recent") or []
         pool = [p for p in files if p not in recent] or list(files)
@@ -521,18 +537,18 @@ def _tts_synth(text):
                                    timeout=max(5, int(CONFIG.get("tts_timeout", 60) or 60)))
             except Exception as e:
                 err = f"{backend} {type(e).__name__}"
-                print(f"[伪人] TTS {backend} 异常: {e}")
+                print(f"[AI对话] TTS {backend} 异常: {e}")
                 continue
             if r.returncode == 0 and os.path.exists(out):
                 try:
                     os.remove(txt)
                 except Exception:
                     pass
-                print(f"[伪人] 语音合成({backend}): {len(text)}字 {time.time()-_t0:.1f}s "
+                print(f"[AI对话] 语音合成({backend}): {len(text)}字 {time.time()-_t0:.1f}s "
                       f"-> {os.path.getsize(out)//1024}KB")
                 return out, None
             err = (r.stderr or r.stdout or "未知错误").strip().splitlines()[-1][:120]
-            print(f"[伪人] TTS {backend} 失败，试下一个: {err}")
+            print(f"[AI对话] TTS {backend} 失败，试下一个: {err}")
         try:
             os.remove(txt)
         except Exception:
@@ -569,23 +585,23 @@ def _voice_segment(text):
     raw = (text or "").strip()
     spoken = _tts_clean(raw)
     if spoken != raw:
-        print(f"[伪人] 语音内容已清洗: {raw[:30]!r} -> {spoken[:30]!r}")
+        print(f"[AI对话] 语音内容已清洗: {raw[:30]!r} -> {spoken[:30]!r}")
     if len(spoken) < 2:
-        print(f"[伪人] 语音未发送: 清洗后没有可念的内容({raw[:20]!r})")
+        print(f"[AI对话] 语音未发送: 清洗后没有可念的内容({raw[:20]!r})")
         return None
     path, err = _tts_synth(spoken)
     if not path:
-        print(f"[伪人] 语音未发送: {err}")
+        print(f"[AI对话] 语音未发送: {err}")
         return None
     try:
         if os.path.getsize(path) > _VOICE_MAX_KB * 1024:
-            print(f"[伪人] 语音过大({os.path.getsize(path)//1024}KB)，跳过")
+            print(f"[AI对话] 语音过大({os.path.getsize(path)//1024}KB)，跳过")
             return None
         with open(path, "rb") as f:
             b64 = base64.b64encode(f.read()).decode()
         return {"type": "record", "data": {"file": "base64://" + b64}}
     except Exception as e:
-        print(f"[伪人] 语音编码失败: {e}")
+        print(f"[AI对话] 语音编码失败: {e}")
         return None
     finally:
         try:
@@ -598,14 +614,14 @@ def _sticker_segment(path):
     """图片消息段（sub_type=1 表示表情/动画表情）；走 base64:// 免去宿主机→容器路径映射"""
     try:
         if os.path.getsize(path) > _STICKER_MAX_KB * 1024:
-            print(f"[伪人] 表情过大，跳过: {path}")
+            print(f"[AI对话] 表情过大，跳过: {path}")
             return None
         with open(path, "rb") as f:
             b64 = base64.b64encode(f.read()).decode()
         return {"type": "image", "data": {"file": "base64://" + b64,
                                           "sub_type": 1, "summary": "[动画表情]"}}
     except Exception as e:
-        print(f"[伪人] 表情编码失败: {e}")
+        print(f"[AI对话] 表情编码失败: {e}")
         return None
 
 
@@ -716,7 +732,7 @@ def _build_segments(text, session_key="", budget=None):
             _raw = _voices[int(m.group(3))][2] if int(m.group(3)) < len(_voices) else ""
             if int(budget.get("voice", 1)) <= 0:
                 seg = None
-                print("[伪人] 语音已用过一条，其余转文本")
+                print("[AI对话] 语音已用过一条，其余转文本")
             else:
                 seg = _voice_segment(_raw) if _tts_available() else None
                 if seg:
@@ -724,7 +740,7 @@ def _build_segments(text, session_key="", budget=None):
             if seg:
                 segs.append(seg)
             else:
-                print(f"[伪人] 语音未发送: {_tts_clean(_raw)[:20] or '(无可念内容)'}")
+                print(f"[AI对话] 语音未发送: {_tts_clean(_raw)[:20] or '(无可念内容)'}")
                 _txt = _tts_clean(_raw)
                 if _txt:
                     segs.append({"type": "text", "data": {"text": _txt}})   # 合成失败就把话当文本发
@@ -739,7 +755,7 @@ def _build_segments(text, session_key="", budget=None):
                 segs.append(seg)
                 budget["left"] = int(budget.get("left", 0)) - 1
             else:
-                print(f"[伪人] 表情未发送: {tag}")
+                print(f"[AI对话] 表情未发送: {tag}")
         last = m.end()
     if last < len(text):
         segs.append({"type": "text", "data": {"text": text[last:]}})
@@ -780,9 +796,13 @@ def _split_messages(segs):
 
 
 def _send_one(event, segs):
-    """发一条消息；开启自动撤回时抓 message_id 再延迟撤回"""
+    """发一条消息；顺手记下 message_id（判"被回复"用），开启自动撤回时再延迟撤回"""
     if not bool(CONFIG.get("auto_recall_pseudo", False)):
-        send_message(event, segs)
+        try:
+            ws_send(event, segs, on_ok=lambda d: _remember_own_msg(
+                ((d or {}).get("data") or {}).get("message_id") or (d or {}).get("message_id")))
+        except Exception:
+            send_message(event, segs)
         return
     delay = int(CONFIG.get("recall_delay_sec", 60) or 60)
 
@@ -797,13 +817,13 @@ def _send_one(event, segs):
                 time.sleep(max(5, delay))
                 try:
                     ws_delete_msg(mid)
-                    print(f"[伪人] 已撤回消息: {mid}")
+                    print(f"[AI对话] 已撤回消息: {mid}")
                 except Exception as e:
-                    print(f"[伪人] 撤回失败: {e}")
+                    print(f"[AI对话] 撤回失败: {e}")
 
             threading.Thread(target=_later, daemon=True).start()
         except Exception as e:
-            print(f"[伪人] 撤回调度失败: {e}")
+            print(f"[AI对话] 撤回调度失败: {e}")
 
     ws_send(event, segs, on_ok=_on_ok)
 
@@ -815,7 +835,7 @@ def _send_segments(event, segs):
         if i > 0:
             time.sleep(random.uniform(0.5, 1.2))
         _send_one(event, one)
-        print(f"[伪人] 发出第 {i+1}/{len(msgs)} 条: {[s.get('type') for s in one]}")
+        print(f"[AI对话] 发出第 {i+1}/{len(msgs)} 条: {[s.get('type') for s in one]}")
 
 
 _fail_notice = {}              # 会话 -> 上次通知时间戳
@@ -838,9 +858,9 @@ def _notify_master(text, key=""):
             qqs = [qqs]
         for qq in qqs:
             try:
-                send_message({"message_type": "private", "user_id": int(qq)}, f"[伪人] {text}")
+                send_message({"message_type": "private", "user_id": int(qq)}, f"[AI对话] {text}")
             except Exception as e:
-                print(f"[伪人] 转发主人失败: {e}")
+                print(f"[AI对话] 转发主人失败: {e}")
     except Exception:
         pass
 
@@ -1003,9 +1023,13 @@ CONFIG = {
     "split_delay_min": 1,
     "split_delay_max": 3,
     
-    # 触发配置
+    # 对话模式：normal=只认 @ 与唤醒词；pseudo=normal + 被回复触发 + 随机接话
+    "chat_mode": "normal",
+
+    # 触发配置（random_* 只在伪人模式生效）
     "reply_probability": 1.0,
-    "random_reply_probability": 0.0,
+    "random_reply_probability": 0.05,
+    "random_reply_cooldown_sec": 120,
     "record_group_unrelated": False,  # 群聊是否记录与机器人无关的消息（False 仅记录回复/提及，避免污染上下文）
     
     # 上下文配置
@@ -1020,7 +1044,7 @@ CONFIG = {
 
     # 人设
     "default_persona": "",  # 第一层默认人设（留空用内置：你是{bot名}温柔可爱…；可 web 配置覆盖）
-    # 注：系统补充指令（群聊伪装规范）已硬编码为 _SYSTEM_SUPPLEMENT_INSTRUCTIONS，不再作为可配置项
+    # 注：系统补充指令按 chat_mode 选：伪人=_SUPPLEMENT_PSEUDO（装群友），普通=_SUPPLEMENT_NORMAL
 
     # 表情包（本地库 data/stickers/，AI 用 [表情:标签] 引用）
     "sticker_enabled": True,
@@ -1054,9 +1078,9 @@ def load_config():
             with open(config_path, "r", encoding="utf-8") as f:
                 loaded = json.load(f)
                 CONFIG.update(loaded)
-                print(f"[伪人] 配置加载成功，当前模型: {CONFIG.get('current_model')}")
+                print(f"[AI对话] 配置加载成功，当前模型: {CONFIG.get('current_model')}")
     except Exception as e:
-        print(f"[伪人] 加载配置失败: {e}")
+        print(f"[AI对话] 加载配置失败: {e}")
 
 # 配置热更新（文件变化自动重载，无需重启 Bot）
 _PERSONA_CFG_PATH = os.path.join(os.path.dirname(__file__), "..", "data", "persona_config.json")
@@ -1111,7 +1135,7 @@ def _health_check():
     if not api_key:
         return
     try:
-        print(f"[伪人] 健康检查: 测试模型 {primary}...")
+        print(f"[AI对话] 健康检查: 测试模型 {primary}...")
         resp = requests.post(
             model_config["api_url"],
             headers={"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"},
@@ -1120,13 +1144,13 @@ def _health_check():
         )
         if resp.status_code == 200:
             with _model_lock:
-                print(f"[伪人] 健康检查通过，切回模型 {primary}")
+                print(f"[AI对话] 健康检查通过，切回模型 {primary}")
                 _active_model = None
                 _primary_fail_time = 0
     except:
         with _model_lock:
             _primary_fail_time = time.time()
-            print(f"[伪人] 健康检查失败，模型 {primary} 仍不可用")
+            print(f"[AI对话] 健康检查失败，模型 {primary} 仍不可用")
 
 def _health_check_loop():
     """后台健康检查循环"""
@@ -1273,7 +1297,7 @@ def clear_history(event=None, key=None):
                 del message_history[k]
         else:
             message_history.clear()
-    print("[伪人] 历史已清除")
+    print("[AI对话] 历史已清除")
 
 def is_at_me(event):
     bot_qq = str(event.get("self_id", get_config("BOT_QQ", "")))
@@ -1283,7 +1307,43 @@ def is_at_me(event):
                 return True
     return False
 
+_own_msg_ids = {}                     # message_id -> 时间戳（记自己发出去的消息，用于"被回复"判定）
+_own_msg_lock = threading.Lock()
+
+
+def _remember_own_msg(message_id):
+    """记下自己发出的消息 id（只留最近 200 条），用于识别"有人回复机器人" """
+    try:
+        mid = str(message_id)
+    except Exception:
+        return
+    if not mid or mid == "None":
+        return
+    now = time.time()
+    with _own_msg_lock:
+        _own_msg_ids[mid] = now
+        if len(_own_msg_ids) > 200:
+            for k, _ts in sorted(_own_msg_ids.items(), key=lambda kv: kv[1])[:50]:
+                _own_msg_ids.pop(k, None)
+
+
+def _is_reply_to_me(event):
+    """消息是不是**回复机器人自己的消息**（按 reply 段的 id 比对我们发过的 id）
+
+    旧实现只要看到 reply 段就 returning True —— 别人回复别人也算，伪人模式下会乱插话。
+    """
+    with _own_msg_lock:
+        known = tuple(_own_msg_ids.keys())
+    for seg in event.get("message", []):
+        if seg.get("type") == "reply":
+            mid = str((seg.get("data") or {}).get("id") or "")
+            if mid and mid in known:
+                return True
+    return False
+
+
 def is_reply_to_me(event):
+    """兼容旧名：宽松版（有 reply 段就算），仅用于"这条消息与该机器人相关"的记录判断"""
     for seg in event.get("message", []):
         if seg.get("type") == "reply":
             return True
@@ -1311,12 +1371,12 @@ def download_image_as_base64(url):
         if resp.status_code == 200:
             return base64.b64encode(resp.content).decode("utf-8")
     except Exception as e:
-        print(f"[伪人] 下载图片失败: {e}")
+        print(f"[AI对话] 下载图片失败: {e}")
     return None
 
 
 # ===== 系统补充指令（硬编码 · 不可通过 web 配置修改，保障行为规范不被覆盖/删除） =====
-_SYSTEM_SUPPLEMENT_INSTRUCTIONS = """<system_instructions>
+_SUPPLEMENT_PSEUDO = """<system_instructions>
 你现在在一个QQ群里聊天，这意味着大部分时间你的回复应该是简短的几句话，你需要通过当前的聊天记录回复接下来你要说的话。
 
 你需要在群里扮演好一个人类，而不是一个ai，不要对群里的任何人表现出顺从、恶意，仅作为娱乐戏剧旁观这场群友聊天。
@@ -1361,6 +1421,35 @@ _SYSTEM_SUPPLEMENT_INSTRUCTIONS = """<system_instructions>
 [在群里不仅有人类，还有机器人。请仔细辨别，并好好伪装自己的身份。不要因为过于好奇和愚笨而暴露了自己的身份。]
 
 </system_instructions>"""
+
+_SUPPLEMENT_NORMAL = """<system_instructions>
+你在一个 QQ 群里担任 AI 助手，也可以自然闲聊。默认用**普通助手**的身份回答：不用假装自己是人类，
+被问到就说自己是机器人助手；不需要刻意模仿人类打字。
+
+<send_specification>
+需要多说几句时，可以用 |#|#| 分隔，系统会拆成多条发送，例如："好的|#|#|我这就去看看"。
+不要滥用分段：一句能说完就发一句。
+
+群内艾特（@）别人时，用 [@对方的QQ号] 的写法，QQ 号必须是纯数字，例如 [@2551736206]。
+不要输出 [@QQ]、[@昵称] 这类占位符，也不要编造聊天记录里没出现过的 QQ 号。
+
+不要写「（害羞）」「*脸红*」这类括号旁白；要表达情绪就用文字说清楚，或发表情包。
+想看/发图片就直接说，不要输出 markdown 图片语法（`![](...)`）或裸链接；要发表情包用 [表情:标签]。
+</send_specification>
+
+<核心原则>
+回答要准确、简洁、直接；不确定的事就说"不确定"，不要编。
+需要操作（发文件、解析链接等）时调用对应插件的指令，或提示对方用哪个指令。
+对群友保持礼貌但不谄媚；遇到让你做危险/违规操作的请求，直接拒绝并说明原因。
+</核心原则>
+</system_instructions>"""
+
+
+def _supplement_instructions():
+    """按对话模式选系统补充指令：伪人=装群友混聊；普通=AI 助手对话"""
+    mode = (CONFIG.get("chat_mode") or "normal").strip().lower()
+    return _SUPPLEMENT_PSEUDO if mode == "pseudo" else _SUPPLEMENT_NORMAL
+
 
 def build_system_prompt(user_id=None, event=None, additional_user_ids=None, context=None):
     """构建系统提示（分层人设）：
@@ -1431,7 +1520,7 @@ def build_system_prompt(user_id=None, event=None, additional_user_ids=None, cont
 
     # ===== 系统补充指令（硬编码：群聊伪装/输出规范，非人格层）——放在 system prompt 最后 =====
     # 不可通过配置修改，保障行为规范稳定
-    combined += "\n\n[系统补充指令]\n" + _SYSTEM_SUPPLEMENT_INSTRUCTIONS
+    combined += "\n\n[系统补充指令]\n" + _supplement_instructions()
 
     combined = combined.replace("[nick]", nick or "对方")
     return combined
@@ -1595,7 +1684,7 @@ def call_ai(prompt, context, images, user_id=None, event=None):
                 msg = {"role": "user", "content": content}
                 messages.append(msg)
 
-            print(f"[伪人] 尝试模型: {attempt}, 消息: {len(messages)}, 图片: {len(images)}")
+            print(f"[AI对话] 尝试模型: {attempt}, 消息: {len(messages)}, 图片: {len(images)}")
 
             import time as _time
             # 瞬时故障（连接被重置/超时/限流/5xx）先在**同一模型**上重试一次，再谈切换：
@@ -1617,14 +1706,14 @@ def call_ai(prompt, context, images, user_id=None, event=None):
                     )
                 except Exception as _e:
                     if _try == 0:
-                        print(f"[伪人] {attempt} 连接异常，{_RETRY_DELAY}s 后重试一次: {_e}")
+                        print(f"[AI对话] {attempt} 连接异常，{_RETRY_DELAY}s 后重试一次: {_e}")
                         time.sleep(_RETRY_DELAY)
                         continue
                     raise
                 _elapsed = _time.time() - _start
-                print(f"[伪人] 返回耗时: {_elapsed:.1f}s, 状态码: {resp.status_code}" + ("（重试）" if _try else ""))
+                print(f"[AI对话] 返回耗时: {_elapsed:.1f}s, 状态码: {resp.status_code}" + ("（重试）" if _try else ""))
                 if resp.status_code in _TRANSIENT and _try == 0:
-                    print(f"[伪人] {attempt} 返回 {resp.status_code}，{_RETRY_DELAY}s 后重试一次")
+                    print(f"[AI对话] {attempt} 返回 {resp.status_code}，{_RETRY_DELAY}s 后重试一次")
                     time.sleep(_RETRY_DELAY)
                     continue
                 break
@@ -1633,18 +1722,18 @@ def call_ai(prompt, context, images, user_id=None, event=None):
                 with _model_lock:
                     if attempt == _primary_model_name():
                         if _active_model:
-                            print(f"[伪人] 主模型 {attempt} 已恢复，切回")
+                            print(f"[AI对话] 主模型 {attempt} 已恢复，切回")
                             _active_model = None
                             _primary_fail_time = 0
                     elif _active_model != attempt:
                         _active_model = attempt
                         _primary_fail_time = _time.time()
-                        print(f"[伪人] 主模型 {primary} 不可用，暂用 {attempt}")
+                        print(f"[AI对话] 主模型 {primary} 不可用，暂用 {attempt}")
                 return resp.json()["choices"][0]["message"]["content"], None
             last_error = f"{attempt} API 错误: {resp.status_code}"
         except Exception as e:
             last_error = f"{attempt} 调用失败: {e}"
-            print(f"[伪人] {attempt} 调用异常，试下一个: {e}")
+            print(f"[AI对话] {attempt} 调用异常，试下一个: {e}")
 
     return None, last_error
 
@@ -1688,7 +1777,7 @@ def save_config():
         json.dump(_out, f, ensure_ascii=False, indent=2)
 
 # ============ 指令注册表（集中定义，一眼可读）============
-registry = CommandRegistry("伪人")
+registry = CommandRegistry("AI对话")
 
 
 def _cmd_enable(event, raw, kw):
@@ -1732,6 +1821,26 @@ def _cmd_switch_gemini(event, raw, kw):
         _active_model = None
         _primary_fail_time = 0
     send_message(event, msg("switch_gemini", "已切换到 Gemini 2.5 Flash"))
+    return True
+
+
+def _cmd_set_mode(event, raw, kw):
+    """切换模式 普通 / 切换模式 伪人"""
+    arg = (raw or "")[len(kw):].strip().lower()
+    if not arg:
+        send_message(event, f"当前模式：{CONFIG.get('chat_mode', 'normal')}。用法：切换模式 普通 / 切换模式 伪人")
+        return True
+    if arg in ("普通", "normal", "ai", "对话"):
+        mode = "normal"
+    elif arg in ("伪人", "pseudo", "装人"):
+        mode = "pseudo"
+    else:
+        send_message(event, "用法：切换模式 普通 / 切换模式 伪人")
+        return True
+    CONFIG["chat_mode"] = mode
+    save_config()
+    tip = "（被 @ 或叫名字才回）" if mode == "normal" else "（多了被回复触发 + 随机接话）"
+    send_message(event, f"已切换到{'普通' if mode == 'normal' else '伪人'}模式{tip}")
     return True
 
 
@@ -1783,6 +1892,7 @@ registry.register("关闭伪人", [cmd("disable", "关闭伪人")], "关闭伪�
 registry.register("切换GLM模型", [cmd("switch_glm", "切换glm"), cmd("switch_glm_alt", "用glm")], "把 AI 模型切换为 GLM", _cmd_switch_glm, master_only=True)
 registry.register("切换Gemini模型", [cmd("switch_gemini", "切换gemini"), cmd("switch_gemini_alt", "用gemini")], "把 AI 模型切换为 Gemini", _cmd_switch_gemini, master_only=True)
 registry.register("查看当前模型", [cmd("current_model", "当前模型"), cmd("current_model_alt", "用什么模型")], "查看当前使用的 AI 模型", _cmd_current_model, master_only=True)
+registry.register("切换对话模式", [cmd("set_mode", "切换模式")], "在普通模式（只认 @/唤醒词）与伪人模式（+被回复+随机接话）之间切换", _cmd_set_mode, master_only=True, kind="prefix")
 registry.register("切换模型型号", [cmd("use_model", "切换模型")], "把 AI 换成指定型号（同一条中转上切换）", _cmd_use_model, master_only=True, kind="prefix")
 registry.register("清除会话历史", [cmd("clear_history", "清除历史"), cmd("clear_history_alt", "清空历史"), cmd("clear_history_alt2", "清空记忆")], "清除当前会话的对话历史", _cmd_clear_history, master_only=True)
 registry.register("清除所有历史", [cmd("clear_all", "清除所有历史"), cmd("clear_all_alt", "清空所有历史"), cmd("clear_all_alt2", "清空所有记忆")], "清除全部会话的对话历史", _cmd_clear_all, master_only=True)
@@ -1842,6 +1952,32 @@ def _is_own_bot(user_id):
         return False
 
 
+_random_last = {}                     # 会话 -> 上次随机接话时间戳
+_random_lock = threading.Lock()
+
+
+def _random_reply_hit(event, text, images):
+    """伪人模式下的随机接话判定：概率 + 同会话冷却；图片/表情包和过短消息不接。"""
+    p = float(CONFIG.get("random_reply_probability", 0.05) or 0)
+    if p <= 0 or event.get("message_type") != "group":
+        return False
+    if images or not (text or "").strip():
+        return False
+    t = text.strip()
+    if len(t) < 2 or t.startswith("["):
+        return False
+    cooldown = float(CONFIG.get("random_reply_cooldown_sec", 120) or 0)
+    key = get_session_key(event)
+    now = time.time()
+    with _random_lock:
+        if cooldown > 0 and (now - float(_random_last.get(key) or 0)) < cooldown:
+            return False
+        if random.random() >= p:
+            return False
+        _random_last[key] = now
+    return True
+
+
 def handle(event):
     """插件入口"""
     global _active_model, _primary_fail_time
@@ -1888,22 +2024,29 @@ def handle(event):
         _log('info', f'忽略本部署另一个 bot 的私聊: user_id={user_id}')
         return False
 
-    # 检查触发条件
+    # ===== 触发判定（按对话模式）=====
+    #   普通模式：被 @ 、或消息里出现机器人名字（唤醒词）
+    #   伪人模式：普通模式 + 「有人回复机器人」+ 「随机接话」
+    mode = (CONFIG.get("chat_mode") or "normal").strip().lower()
     triggered = False
     bot_name = CONFIG.get("bot_name", get_bot_name())
-    
-    # 触发判定：私聊直接对话；群聊按 @ / 提及机器人名触发
+    has_image = len(images) > 0
+
     if msg_type == "private":
         triggered = True  # 私聊默认直接对话，无需 @ 或提及名字
-        print("[伪人] 私聊触发")
-    elif text and bot_name in text:
-        print(f"[伪人] 关键词触发: {text}")
-        triggered = True
+        print("[AI对话] 私聊触发")
     elif is_at_me(event):
-        print("[伪人] 被 @ 触发")
+        print("[AI对话] 被 @ 触发")
         triggered = True
-    
-    has_image = len(images) > 0
+    elif text and bot_name in text:
+        print(f"[AI对话] 唤醒词触发: {text}")
+        triggered = True
+    elif mode == "pseudo" and _is_reply_to_me(event):
+        print("[AI对话] 被回复触发（伪人模式）")
+        triggered = True
+    elif mode == "pseudo" and _random_reply_hit(event, text, images):
+        print(f"[AI对话] 随机接话命中（伪人模式）: {text[:24]}")
+        triggered = True
 
     if not triggered:
         # 非触发消息：私聊全部记录；群聊默认仅记录与机器人相关的消息（回复/提及），
@@ -1977,7 +2120,7 @@ def _process_ai_item(event, text, clean_text, images, user_id, has_image):
 
         response, error = call_ai(clean_text, context, images, user_id=user_id, event=event)
         if error:
-            print(f"[伪人] {error}")
+            print(f"[AI对话] {error}")
             _notify_master(f"AI 调用失败（{get_session_key(event)}）：{error}", key=get_session_key(event))
         if not response:
             response = msg("no_reply", "唔...我好像有点累了，待会再聊吧~")
@@ -2006,9 +2149,9 @@ def _process_ai_item(event, text, clean_text, images, user_id, has_image):
                 ))
             segs = _build_segments(part, session_key, budget)
             _send_segments(event, segs)
-            print(f"[伪人] 发送: {part}")
+            print(f"[AI对话] 发送: {part}")
     except Exception as e:
-        print(f"[伪人] AI处理异常: {e}")
+        print(f"[AI对话] AI处理异常: {e}")
         _notify_master(f"处理异常（{get_session_key(event)}）：{e}", key=get_session_key(event))
         import traceback
         traceback.print_exc()
