@@ -142,12 +142,18 @@ __config_schema__ = {
         "help": "主模型失败后多久探测一次、能否切回（源码下限 60 秒）",
         "default": 1800,
     },
+    "random_reply_points": {
+        "type": "number", "label": "随机接话点数", "group": "参数",
+        "path": "random_reply_points", "min": 0, "max": 500, "step": 5, "unit": "条",
+        "help": "**只在伪人模式生效**：群里每来一条真人的消息 +1 点，满这么多点就主动插一句话、然后清零"
+                "（0=关闭）。就是咸鱼插件里「触发点数」那套",
+        "default": 30,
+    },
     "random_reply_probability": {
-        "type": "number", "label": "随机接话概率", "group": "参数", "advanced": True,
-        "path": "random_reply_probability", "min": 0, "max": 0.5, "step": 0.05, "unit": "0~0.5",
-        "help": "**只在伪人模式生效**：群聊里没被 @、也没提机器人名时主动插话的概率（0.05=5%）。"
-                "图片/表情包和 2 字以下的消息不接。想更自然建议同时打开「记录无关群消息」",
-        "default": 0.05,
+        "type": "number", "label": "满点后插话概率", "group": "参数", "advanced": True,
+        "path": "random_reply_probability", "min": 0, "max": 1, "step": 0.1, "unit": "0~1",
+        "help": "点数满的时候，按这个概率决定这次插不插话（1=满点必插，0.5=有一半机会留到下一轮）",
+        "default": 1.0,
     },
     "random_reply_cooldown_sec": {
         "type": "number", "label": "随机接话冷却", "group": "参数", "advanced": True,
@@ -1043,6 +1049,11 @@ CONFIG = {
     "reply_probability": 1.0,
     "random_reply_probability": 0.05,
     "random_reply_cooldown_sec": 120,
+    # 随机接话（点数累积制，同咸鱼插件的「触发点数」）：
+    #   群里每来一条真人的消息 +1 点，满 random_reply_points 点就插一句（然后清零）
+    "random_reply_points": 30,
+    "random_reply_probability": 1.0,
+
     # 续接窗口：机器人刚回过某人后，这个人在 N 秒内再说的话不用 @/叫名字也继续回（0=关闭）
     "followup_window_sec": 120,
     "record_group_unrelated": False,  # 群聊是否记录与机器人无关的消息（False 仅记录回复/提及，避免污染上下文）
@@ -2059,9 +2070,41 @@ _random_last = {}                     # 会话 -> 上次随机接话时间戳
 _random_lock = threading.Lock()
 
 
+_points = {}                          # 会话 -> 已累积点数（咸鱼那套「触发点数」）
+_points_lock = threading.Lock()
+
+
+def _bump_points(event):
+    """真人群消息 +1 点；满 random_reply_points 时返回 True 并清零（相当于"聊够了，插一句"）"""
+    need = int(CONFIG.get("random_reply_points", 0) or 0)
+    if need <= 0:
+        return False
+    key = get_session_key(event)
+    with _points_lock:
+        n = int(_points.get(key, 0)) + 1
+        if n < need:
+            _points[key] = n
+            return False
+        _points[key] = 0              # 满点清零（咸鱼：触发一次后重新攒）
+    prob = float(CONFIG.get("random_reply_probability", 1.0) or 0)
+    if random.random() >= prob:
+        with _points_lock:            # 这次没插：把点数留一半，下一轮更容易命中，别一直不吭声
+            _points[key] = max(1, need // 2)
+        return False
+    return True
+
+
+def _reset_points(event):
+    try:
+        with _points_lock:
+            _points[get_session_key(event)] = 0
+    except Exception:
+        pass
+
+
 def _random_reply_hit(event, text, images):
     """伪人模式下的随机接话判定：概率 + 同会话冷却；图片/表情包和过短消息不接。"""
-    p = float(CONFIG.get("random_reply_probability", 0.05) or 0)
+    p = float(CONFIG.get("random_reply_legacy_prob", 0) or 0)   # 旧的"每条消息掷骰子"通道，默认关闭
     if p <= 0 or event.get("message_type") != "group":
         return False
     if images or not (text or "").strip():
@@ -2139,6 +2182,13 @@ def handle(event):
     # 否则两个 bot 会互相点名死循环（2026-10-31 实测：40 秒互相刷了 9+ 条，烧 AI 配额）。
     # 明确 @ 我、或回复我的消息仍然算（那是显式意图，也方便测试联动）。
     _peer_bot = (msg_type == "group" and _is_own_bot(user_id))
+    # 点数累积：所有真人的群消息都算（含 @ 别人的、图片），满点就插话
+    _pts_hit = False
+    if msg_type == "group" and mode == "pseudo" and not _peer_bot and (text or images):
+        try:
+            _pts_hit = _bump_points(event)
+        except Exception:
+            _pts_hit = False
     if msg_type == "private":
         triggered = True  # 私聊默认直接对话，无需 @ 或提及名字
         print("[AI对话] 私聊触发")
@@ -2153,8 +2203,11 @@ def handle(event):
     elif mode == "pseudo" and _is_reply_to_me(event):
         print("[AI对话] 被回复触发（伪人模式）")
         triggered = True
+    elif mode == "pseudo" and not _peer_bot and _pts_hit:
+        print(f"[AI对话] 随机接话命中（点数满 {CONFIG.get('random_reply_points')}）: {(text or '')[:24]}")
+        triggered = True
     elif mode == "pseudo" and not _peer_bot and _random_reply_hit(event, text, images):
-        print(f"[AI对话] 随机接话命中（伪人模式）: {text[:24]}")
+        print(f"[AI对话] 随机接话命中（概率）: {text[:24]}")
         triggered = True
     elif not _peer_bot and _is_followup(event):
         print(f"[AI对话] 续接触发（刚回过的同一个人）: {text[:24] if text else ''}")
