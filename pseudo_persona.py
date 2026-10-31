@@ -1153,6 +1153,13 @@ def load_config():
                 loaded = json.load(f)
                 CONFIG.update(loaded)
                 print(f"[AI对话] 配置加载成功，当前模型: {CONFIG.get('current_model')}")
+                # chat_mode 为空 = 普通模式：只认 @ 与唤醒词，**被回复触发/随机接话都不生效**。
+                # 线上踩过（2026-11-01）：命令行开了伪人模式，后来面板保存把 chat_mode 写回空串，
+                # 重启后静默退回普通模式，群友回复机器人完全没反应，日志里也看不出来。
+                _cm = (CONFIG.get("chat_mode") or "").strip().lower()
+                if _cm != "pseudo":
+                    print(f"[AI对话] ⚠ 对话模式 = {_cm or '(空=普通模式)'}：被回复触发与随机接话**不生效**"
+                          f"（面板「对话模式」选伪人模式才会回）")
     except Exception as e:
         print(f"[AI对话] 加载配置失败: {e}")
 
