@@ -1449,23 +1449,69 @@ def _remember_own_msg(message_id):
     now = time.time()
     with _own_msg_lock:
         _own_msg_ids[mid] = now
+        print(f"[AI对话] 记住自己发的消息 id={mid}（被回复触发要用）")
         if len(_own_msg_ids) > 200:
             for k, _ts in sorted(_own_msg_ids.items(), key=lambda kv: kv[1])[:50]:
                 _own_msg_ids.pop(k, None)
 
 
-def _is_reply_to_me(event):
-    """消息是不是**回复机器人自己的消息**（按 reply 段的 id 比对我们发过的 id）
+_reply_owner_cache = {}               # 被回复消息 id -> 是不是机器人发的（重启/丢 id 时兜底）
+_reply_owner_lock = threading.Lock()
 
-    旧实现只要看到 reply 段就 returning True —— 别人回复别人也算，伪人模式下会乱插话。
+
+def _reply_is_from_bot(mid, bot_qq, timeout=3):
+    """问 NapCat：这条被回复的消息是不是机器人自己发的（结果缓存）。
+
+    为什么要问：`_own_msg_ids` 只活在内存里 —— 进程重启后清空，而群友往往回复的是
+    重启前那条消息（线上 22:17 的「摸摸头」就是回复 22:06 的表情包）。
+    只查一次、结果缓存，失败不缓存。
+    """
+    key = str(mid)
+    with _reply_owner_lock:
+        if key in _reply_owner_cache:
+            return _reply_owner_cache[key]
+    try:
+        http = (get_config("NAPCAT_HTTP", "") or "").rstrip("/")
+        tok = get_config("ACCESS_TOKEN", "") or ""
+        if not http or not re.fullmatch(r"-?\d+", key):
+            return False
+        r = requests.post(f"{http}/get_msg", params={"access_token": tok},
+                          json={"message_id": int(key)}, timeout=timeout).json()
+        d = r.get("data") or {}
+        if not d:
+            return False                     # 查不到（消息太旧/被删）：不缓存，下次还能再查
+        uid = str((d.get("sender") or {}).get("user_id") or "")
+        ok = bool(uid) and uid == str(bot_qq)
+        with _reply_owner_lock:
+            _reply_owner_cache[key] = ok
+        if ok:
+            print(f"[AI对话] 被回复的消息 {key} 是机器人自己发的（内存里没记到，已向 NapCat 核对）")
+        return ok
+    except Exception:
+        return False
+
+
+def _is_reply_to_me(event):
+    """消息是不是**回复机器人自己的消息**。
+
+    判定顺序：① 本进程发过的 id（O(1)）→ ② 问 NapCat 那条消息的发送者。
+    旧实现只要看到 reply 段就 True —— 别人回复别人也算，伪人模式下会乱插话；
+    但另一种反向失效也踩过（2026-11-01）：实例 main.py 缺 echo 分发 → 自己发过的 id
+    一条都没记住 → 「被回复触发」永远不成立，群友回复机器人等于石沉大海。
     """
     with _own_msg_lock:
         known = tuple(_own_msg_ids.keys())
+    bot_qq = str(event.get("self_id", get_config("BOT_QQ", "")))
     for seg in event.get("message", []):
-        if seg.get("type") == "reply":
-            mid = str((seg.get("data") or {}).get("id") or "")
-            if mid and mid in known:
-                return True
+        if seg.get("type") != "reply":
+            continue
+        mid = str((seg.get("data") or {}).get("id") or "")
+        if not mid:
+            continue
+        if mid in known:
+            return True
+        if _reply_is_from_bot(mid, bot_qq):
+            return True
     return False
 
 
