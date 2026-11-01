@@ -2867,15 +2867,22 @@ def handle(event):
         _log('debug', f'过滤自消息: user_id={user_id}')
         return False
 
+    # ===== 总开关 / 分群开关：只有「开启/关闭AI对话」能穿过，其它指令一律不处理 =====
+    # 之前把特权指令放在开关检查**前面**，导致插件没开时「开启伪人模式」照样执行、
+    # 把 group_chat_modes 改成了 pseudo（用户 2026-11-02 发现的问题）。
+    _blocked = (not CONFIG.get("enabled", True)) or \
+               (msg_type == "group" and not _pt_enabled(event.get("group_id"), "pseudo"))
+    if _blocked:
+        _switch_kw = {w for w in (cmd("enable", "开启AI对话"), cmd("disable", "关闭AI对话")) if w}
+        _t = (text or "").strip()
+        if is_privileged(event) and any(_t == w or _t.endswith(w) for w in _switch_kw):
+            # 只放行开关指令，让主人能把插件重新打开
+            return bool(registry.dispatch(event, text, True, master_cmds_only=True))
+        return False
+
     # ===== 特权指令（开关类：主人 + 管理员，注册表统一分发） =====
     if registry.dispatch(event, text, is_privileged(event), master_cmds_only=True):
         return True
-
-    if not CONFIG.get("enabled", True):
-        return False
-    # 分群检查
-    if msg_type == "group" and not _pt_enabled(event.get("group_id"), "pseudo"):
-        return False
 
     # ===== 管理指令（模型切换/历史清理：主人 + 管理员，需 @ 机器人触发） =====
     if is_privileged(event) and is_at_me(event):
