@@ -90,54 +90,54 @@ __config_schema__ = {
     # ---------------- 自适应降频（2026-11-02，方案 A：滑动窗口） ----------------
     "free_n": {
         "type": "number", "label": "窗口内前几次不降频", "group": "降频",
-        "path": "free_n", "min": 0, "max": 100, "step": 1, "unit": "次",
+        "path": "free_n", "readonly": True, "min": 0, "max": 100, "step": 1, "unit": "次",
         "help": "同一个群里同一个人，在窗口时长内触发你的次数不超过这个数，就按原概率回复。",
         "default": 6,
     },
     "window_sec": {
         "type": "number", "label": "降频窗口时长", "group": "降频",
-        "path": "window_sec", "min": 30, "max": 3600, "step": 30, "unit": "秒",
+        "path": "window_sec", "readonly": True, "min": 30, "max": 3600, "step": 30, "unit": "秒",
         "help": "统计「最近 N 秒内他触发了我几次」的窗口。超过 free_n 次开始降权；"
                 "他的消息滑出窗口后权重自动回升，不需要手动恢复。",
         "default": 300,
     },
     "step": {
         "type": "number", "label": "每次超阈值降多少", "group": "降频",
-        "path": "step", "min": 0.001, "max": 0.5, "step": 0.001, "unit": "权重",
+        "path": "step", "readonly": True, "min": 0.001, "max": 0.5, "step": 0.001, "unit": "权重",
         "help": "**自减步长**：窗口内触发次数超过 free_n 后，每多一次就 权重 − 这个值（可细到 0.001）。"
                 "0.03 时第 7 次 0.97、第 12 次 0.82、连刷 27 次才到底 0.2 —— 平滑，不会一脚踩到谷底。",
         "default": 0.03,
     },
     "recover": {
         "type": "number", "label": "每次回升多少", "group": "降频",
-        "path": "recover", "min": 0.001, "max": 0.5, "step": 0.001, "unit": "权重",
+        "path": "recover", "readonly": True, "min": 0.001, "max": 0.5, "step": 0.001, "unit": "权重",
         "help": "**自增步长**：他的节奏缓下来（窗口内次数回到 free_n 以内）后，每次触发把权重加回一点；"
                 "完全没动静时也按 recover_sec 的节奏自动回升，直到 1.0。",
         "default": 0.02,
     },
     "recover_sec": {
         "type": "number", "label": "多久自动回升一次", "group": "降频",
-        "path": "recover_sec", "min": 5, "max": 3600, "step": 5, "unit": "秒",
+        "path": "recover_sec", "readonly": True, "min": 5, "max": 3600, "step": 5, "unit": "秒",
         "help": "对方完全没动静时，每过这么久权重 +recover（默认 60 秒 +0.02，约 50 分钟从 0.2 回到 1.0）。",
         "default": 60,
     },
     "floor": {
         "type": "number", "label": "权重下限", "group": "降频",
-        "path": "floor", "min": 0, "max": 1, "step": 0.01, "unit": "权重",
+        "path": "floor", "readonly": True, "min": 0, "max": 1, "step": 0.01, "unit": "权重",
         "help": "再能刷也不会低于这个权重（0=可以降到完全不回，0.2=最差时约 1/5 概率回）。"
                 "想彻底静默请看「主人标记 AI」。",
         "default": 0.2,
     },
     "gap_base": {
         "type": "number", "label": "最小回复间隔", "group": "降频",
-        "path": "gap_base", "min": 0, "max": 600, "step": 5, "unit": "秒",
+        "path": "gap_base", "readonly": True, "min": 0, "max": 600, "step": 5, "unit": "秒",
         "help": "只对**已进入降频**的人生效：两次回复至少隔 gap_base ÷ 权重 秒（权重 0.2 → 100 秒）。"
                 "正常权重 1.0 不受影响。",
         "default": 20,
     },
     "strip_peer_names": {
         "type": "bool", "label": "降频时不在回复里点名对方", "group": "降频",
-        "path": "strip_peer_names",
+        "path": "strip_peer_names", "readonly": True,
         "help": "进入降频后，把回复里出现的「最近说过话的人的名字」和 @对方 去掉——"
                 "AI 互踢主要靠「艾特」和「叫名字」触发，卡掉这两个等于断了对面的唤醒路径。",
         "default": True,
@@ -2256,7 +2256,11 @@ def save_config():
     """保存配置到文件（系统补充指令 persona 为硬编码，不写入/覆盖配置）"""
     import os
     config_path = os.path.join(os.path.dirname(__file__), "..", "data", "persona_config.json")
-    _out = {k: v for k, v in CONFIG.items() if k != "persona"}
+    # 降频参数是"代码设定"的：面板只读显示、插件自己保存时也不落盘，
+    # 免得哪天调了代码默认值却被文件里的旧值压住（本轮就踩过 step 停在 0.15）
+    _NO_SAVE = ("free_n", "window_sec", "step", "recover", "recover_sec",
+                "floor", "gap_base", "strip_peer_names")
+    _out = {k: v for k, v in CONFIG.items() if k != "persona" and k not in _NO_SAVE}
     with open(config_path, "w", encoding="utf-8") as f:
         json.dump(_out, f, ensure_ascii=False, indent=2)
 
