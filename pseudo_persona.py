@@ -2716,7 +2716,14 @@ def _strip_peer_names(text, event):
     return re.sub(r"\s{2,}", " ", text).strip()
 
 # ============ 好感度：AI 自己判断加不加，这里只给配额 + 兜底削平 ============
-_FAVOR_TAG_RE = re.compile(r"[\[【（(]\s*好感(?:度)?\s*[:：]?\s*([+-]?\d{1,2})\s*[\]】）)]")
+# 取分标记：`[代币：QQ号，+N]`（对模型只说"代币"，不提"好感度"，避免它把记账和感情绑定）
+#   兼容：[好感：QQ,+N] / [QQ,+N] / 裸的 `QQ,+N`（须自成一段）/ 旧式 [好感:+2]（无 QQ）
+_FAVOR_TAG_RE = re.compile(
+    r"[\[【(]\s*(?:好感(?:度)?|代币)?\s*[:：]?\s*(\d{5,12})\s*[,，]\s*([+-]?\d{1,2})\s*[\]】)]"
+    r"|(?:^|[\s|])(\d{5,12})\s*[,，]\s*([+-]?\d{1,2})(?=$|[\s|])"
+    r"|[\[【(]\s*(?:好感(?:度)?|代币)\s*[:：]?\s*([+-]?\d{1,2})\s*[\]】)]",
+    re.MULTILINE)
+_FAVOR_OLD_RE = re.compile(r"[\[【（(]\s*好感(?:度)?\s*[:：]?\s*([+-]?\d{1,2})\s*[\]】）)]")
 
 
 def _wordlib_module():
@@ -2739,41 +2746,54 @@ def _favor_block(event, user_id, nick, weight=1.0):
         if wl is None or not hasattr(wl, "favor_quota"):
             return ""
         if weight < 1.0:
-            return ("\n\n[好感度]\n这个人刚才在刷屏/复读，本次**不要**加好感度，也不要提这件事。")
+            return ("\n\n[代币记账]\n这个人刚才在刷屏/复读，本次**不要**记代币，也不要提这件事。")
         q = wl.favor_quota(user_id)
         if q.get("points_left", 0) <= 0 or q.get("times_left", 0) <= 0:
-            return ("\n\n[好感度]\n今天你已经给这个人加满了好感度"
-                    f"（上限 {q.get('daily')} 分 / {q.get('times')} 次），本次不要再加，也不要提这件事。")
+            return ("\n\n[代币记账]\n今天给这个人记的代币已经满了"
+                    f"（上限 {q.get('daily')} 分 / {q.get('times')} 次），本次不用再记，也不要提这件事。")
+        qq = str(user_id)
         # 注意：这一块**不能影响回复本身**。只给数字与格式，不给"讨好才能加分"的暗示；
         # 也不告诉它对方现有好感度（否则会对不同人区别对待）。
         return (
-            "\n\n[好感度标注 · 内部记账，与你的回复内容无关]\n"
-            "**先照常回复**：语气、长度、称呼、态度一律按你本来的性格，不要为了这个标注改变任何东西；\n"
-            "也不要因为对方好感度高就亲昵、低就冷淡——你此刻的态度与好感度无关。\n"
-            f"回复写完后，如果你觉得这次交流值得记一笔，可以在**最末尾另起一行**写 `[好感:+N]`"
-            f"（N 是 1~{q['per_max']} 的整数）；今天还能记 **{q['points_left']} 分**、**{q['times_left']} 次**。\n"
-            "不值得就完全不写。这一行只给系统看，会被删掉，**不要在正文里提到好感度、也不要写理由**。\n"
-            "不写也完全没问题——不要为了加分而讨好、卖萌或加戏。"
+            "\n\n[代币记账 · 内部记号，与你的回复无关]\n"
+            "系统里有个叫「代币」的记数，用来记录你和某个人聊得怎么样，**和你的态度、人设、称呼都没有关系**。\n"
+            "**先照常回复**：语气、长度、称呼全按你本来的性格，不要因为要记账而改变任何东西；\n"
+            "也不要因为谁代币多就亲昵、少就冷淡——你此刻怎么说话和代币无关。\n"
+            f"回复写完后，**只有当你觉得这次聊得还算合适、有来有回**，才在最末尾另起一行写："
+            f"`[代币：{qq}，+N]`（代币 + 冒号 + QQ号 + 逗号 + 数字；N 是 1~{q['per_max']}，"
+            f"QQ 就用这一条 `{qq}`，别写别人）。\n"
+            f"今天还能给 ta 记 **{q['points_left']} 分**、**{q['times_left']} 次**。\n"
+            "不合适就完全不写；写不写都不影响你怎么回。这一行只给系统看，会被删掉，"
+            "**不要在正文里提代币、不要解释理由**，也不要为了记一笔而讨好、卖萌或加戏。"
         )
     except Exception:
         return ""
 
 
 def _extract_favor(text):
-    """从回复里抽出 [好感:+N] 标记并删掉它。返回 (干净文本, 申请分数合计)"""
+    """抽出取分标记并删掉。返回 (干净文本, [(qq, 分数)])；旧写法 [好感:+N] 的 qq 为 None。"""
     if not text:
-        return text, 0
+        return text, []
     try:
-        hits = list(_FAVOR_TAG_RE.finditer(text))
-        if not hits:
-            return text, 0
-        total = sum(int(h.group(1)) for h in hits)
+        out = []
+        clean = text
+        for m in _FAVOR_TAG_RE.finditer(text):
+            if m.group(5) is not None:            # 旧写法 [好感:+2]：没有 QQ
+                qq, n = None, int(m.group(5))
+            elif m.group(1) is not None:          # [好感：QQ，+N]
+                qq, n = m.group(1), int(m.group(2))
+            else:                                  # 裸的 QQ,+N
+                qq, n = m.group(3), int(m.group(4))
+            if n > 0:
+                out.append((qq, n))
+        if not out:
+            return text, []
         clean = _FAVOR_TAG_RE.sub("", text)
         clean = re.sub(r"[ \t]+\n", "\n", clean)
         clean = re.sub(r"\n{3,}", "\n\n", clean).strip()
-        return clean, max(0, total)
+        return clean, out
     except Exception:
-        return text, 0
+        return text, []
 
 
 def _apply_favor(event, user_id, delta):
@@ -3078,16 +3098,28 @@ def _process_ai_item(event, text, clean_text, images, user_id, has_image,
         add_to_history(event, "assistant", response, triggered=True, user_id=user_id)
 
         # 好感度标记：[好感:+N] 是给系统的指令，必须从正文里摘掉再发（对方不该看到）
-        _favor_delta = 0
+        _favor_hits = []
         try:
-            response, _favor_delta = _extract_favor(response)
+            response, _favor_hits = _extract_favor(response)
+            # 只有 QQ 与「本次对话对象」一致才认（旧写法没写 QQ 的才算给他自己）；
+            # 写别人 / 写得对不上 → 一律忽略，避免"记错人"
+            _apply, _drop = [], []
+            for _qq, _n in (_favor_hits or []):
+                if _qq is None or str(_qq) == str(user_id):
+                    _apply.append(_n)
+                else:
+                    _drop.append((_qq, _n))
+            _favor_delta = sum(_apply)
+            if _drop:
+                print(f"[AI对话] 好感度标记里的 QQ 与对话对象不符，已忽略: {_drop}（对象 {user_id}）")
             if _favor_delta:
-                print(f"[AI对话] AI 申请好感度 +{_favor_delta}")
+                print(f"[AI对话] AI 申请好感度 +{_favor_delta}（{user_id}）")
             if not (response or "").strip():
                 # 模型只吐了个标记、没有正文：宁可这次不发，也不要发一条空消息
                 print("[AI对话] 回复正文为空（只有好感度标记）→ 本次不发送")
                 return
         except Exception as _e:
+            _favor_delta = 0
             print(f"[AI对话] 好感度标记解析失败（忽略）: {_e}")
 
         # 降频状态：回复里不点名/@对方 —— AI 互踢靠「艾特」和「叫名字」唤醒对面，
