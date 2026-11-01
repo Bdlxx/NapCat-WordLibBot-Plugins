@@ -70,8 +70,9 @@ __config_schema__ = {
         "path": "chat_mode",
         "options": [{"value": "normal", "label": "普通模式（只认 @ 与唤醒词）"},
                     {"value": "pseudo", "label": "伪人模式（普通模式 + 被回复触发 + 随机接话）"}],
-        "help": "普通模式：被 @ 或消息里出现机器人名字才回；伪人模式：额外允许「有人回复机器人」+「随机接话（浮点累积）」两种触发。"
-                "续接窗口（刚回过的人接着说也会回）**只在伪人模式生效**；普通模式只认 @ 与唤醒词。只影响触发与提示词，不影响表情包/语音能力",
+        "help": "**这是全局默认**：私聊生效，没单独设置过的群也用它。每个群可以单独设（「群聊管理」的 AI 对话模式开关，"
+                "或群里发「开启伪人模式 / 关闭伪人模式」），群设置优先。普通模式：只认 @ 与唤醒词；"
+                "伪人模式：额外允许「被回复」「随机接话」「续接窗口（刚回过的人接着说）」。只影响触发与提示词，不影响表情包/语音能力",
         "default": "normal",
     },
     "enabled": {
@@ -1156,6 +1157,7 @@ def load_config():
                 # chat_mode 为空 = 普通模式：只认 @ 与唤醒词，**被回复触发/随机接话都不生效**。
                 # 线上踩过（2026-11-01）：命令行开了伪人模式，后来面板保存把 chat_mode 写回空串，
                 # 重启后静默退回普通模式，群友回复机器人完全没反应，日志里也看不出来。
+                CONFIG.setdefault("group_chat_modes", {})
                 _cm = (CONFIG.get("chat_mode") or "").strip().lower()
                 if _cm != "pseudo":
                     print(f"[AI对话] ⚠ 对话模式 = {_cm or '(空=普通模式)'}："
@@ -1716,9 +1718,9 @@ _SUPPLEMENT_NORMAL = """<system_instructions>
 </system_instructions>"""
 
 
-def _supplement_instructions():
+def _supplement_instructions(mode=None):
     """按对话模式选系统补充指令：伪人=装群友混聊；普通=AI 助手对话"""
-    mode = (CONFIG.get("chat_mode") or "normal").strip().lower()
+    mode = str(mode or CONFIG.get("chat_mode") or "normal").strip().lower()
     return _SUPPLEMENT_PSEUDO if mode == "pseudo" else _SUPPLEMENT_NORMAL
 
 
@@ -1793,7 +1795,7 @@ def build_system_prompt(user_id=None, event=None, additional_user_ids=None, cont
 
     # ===== 系统补充指令（硬编码：群聊伪装/输出规范，非人格层）——放在 system prompt 最后 =====
     # 不可通过配置修改，保障行为规范稳定
-    combined += "\n\n[系统补充指令]\n" + _supplement_instructions()
+    combined += "\n\n[系统补充指令]\n" + _supplement_instructions(mode)
 
     # ===== 本次触发方式（放在最末 = 离生成最近，权重最高）=====
     # 随机接话时"没人叫你"，不说清楚模型就会把别人之间的对话当成在问自己
@@ -2241,19 +2243,50 @@ def _cmd_switch_gemini(event, raw, kw):
     return True
 
 
-def _cmd_mode_pseudo(event, raw, kw):
-    """开启伪人模式（= chat_mode: pseudo）"""
-    CONFIG["chat_mode"] = "pseudo"
+
+# ============ 对话模式：**按群**生效（2026-11-01 用户要求） ============
+# 之前只有一个全局 chat_mode：在某个群开伪人模式 = 所有群一起变伪人。
+# 现在：群聊优先用 group_chat_modes[群号]，没设置才回落全局 chat_mode；私聊用全局。
+# 面板「群聊管理」里的 AI 模式开关、群内「开启/关闭伪人模式」指令，改的都是**本群**。
+def _gid_key(event):
+    gid = event.get("group_id")
+    return "" if gid is None else str(gid)
+
+
+def _chat_mode_for(event):
+    """本会话实际生效的对话模式：群设置 → 全局 chat_mode → normal"""
+    if event.get("message_type") == "group":
+        gm = CONFIG.get("group_chat_modes") or {}
+        v = str(gm.get(_gid_key(event)) or "").strip().lower()
+        if v in ("normal", "pseudo"):
+            return v
+    return (CONFIG.get("chat_mode") or "normal").strip().lower()
+
+
+def _set_chat_mode(event, mode):
+    """群聊里改本群；私聊里改全局默认。返回作用范围（"本群"/"全局"）"""
+    mode = "pseudo" if str(mode).lower() == "pseudo" else "normal"
+    if event.get("message_type") == "group":
+        gm = dict(CONFIG.get("group_chat_modes") or {})
+        gm[_gid_key(event)] = mode
+        CONFIG["group_chat_modes"] = gm
+        save_config()
+        return "本群"
+    CONFIG["chat_mode"] = mode
     save_config()
-    send_message(event, msg("mode_on", "已开启伪人模式：被 @、叫名字、被回复、随机接话都会回"))
+    return "全局"
+
+def _cmd_mode_pseudo(event, raw, kw):
+    """开启伪人模式（群聊=本群，私聊=全局）"""
+    scope = _set_chat_mode(event, "pseudo")
+    send_message(event, msg("mode_on", "已开启伪人模式：被 @、叫名字、被回复、随机接话都会回") + f"（{scope}）")
     return True
 
 
 def _cmd_mode_normal(event, raw, kw):
-    """关闭伪人模式（= chat_mode: normal）"""
-    CONFIG["chat_mode"] = "normal"
-    save_config()
-    send_message(event, msg("mode_off", "已切回普通模式：只认 @ 和叫名字"))
+    """关闭伪人模式（群聊=本群，私聊=全局）"""
+    scope = _set_chat_mode(event, "normal")
+    send_message(event, msg("mode_off", "已切回普通模式：只认 @ 和叫名字") + f"（{scope}）")
     return True
 
 
@@ -2262,7 +2295,7 @@ def _cmd_set_mode(event, raw, kw):
     """切换模式 普通 / 切换模式 伪人"""
     arg = (raw or "")[len(kw):].strip().lower()
     if not arg:
-        send_message(event, f"当前模式：{CONFIG.get('chat_mode', 'normal')}。用法：切换模式 普通 / 切换模式 伪人")
+        send_message(event, f"当前模式：{_chat_mode_for(event)}。用法：切换模式 普通 / 切换模式 伪人")
         return True
     if arg in ("普通", "normal", "ai", "对话"):
         mode = "normal"
@@ -2271,10 +2304,9 @@ def _cmd_set_mode(event, raw, kw):
     else:
         send_message(event, "用法：切换模式 普通 / 切换模式 伪人")
         return True
-    CONFIG["chat_mode"] = mode
-    save_config()
-    tip = "（被 @ 或叫名字才回）" if mode == "normal" else "（多了被回复触发 + 随机接话）"
-    send_message(event, f"已切换到{'普通' if mode == 'normal' else '伪人'}模式{tip}")
+    scope = _set_chat_mode(event, mode)
+    tip = "（只认 @ 与唤醒词）" if mode == "normal" else "（+被回复+随机接话+续接）"
+    send_message(event, f"已切换到{'普通' if mode == 'normal' else '伪人'}模式{tip}（{scope}）")
     return True
 
 
@@ -2512,7 +2544,7 @@ def handle(event):
     # ===== 触发判定（按对话模式）=====
     #   普通模式：被 @ 、或消息里出现机器人名字（唤醒词）
     #   伪人模式：普通模式 + 「有人回复机器人」+ 「随机接话」
-    mode = (CONFIG.get("chat_mode") or "normal").strip().lower()
+    mode = _chat_mode_for(event)          # 群聊按本群设置，私聊按全局
     triggered = False
     trigger_kind = ""          # 为什么回：private / at / wake / reply / random / followup
     bot_name = CONFIG.get("bot_name", get_bot_name())
