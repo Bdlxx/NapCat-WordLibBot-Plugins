@@ -1902,6 +1902,13 @@ def build_system_prompt(user_id=None, event=None, additional_user_ids=None, cont
     if _trigger_hint:
         combined += "\n\n" + _trigger_hint
 
+    # ===== 好感度：告诉 AI 今天还能给这个人加多少，让它自己判断（降频中的人不给）=====
+    try:
+        _fav_w, _ = _weight_for(event, user_id) if event is not None else (1.0, 0)
+    except Exception:
+        _fav_w = 1.0
+    combined += _favor_block(event, user_id, nick, _fav_w)
+
     combined = combined.replace("[nick]", nick or "对方")
     return combined
 
@@ -2706,6 +2713,88 @@ def _strip_peer_names(text, event):
         text = text.replace(n, "")                                               # 直呼名字
     return re.sub(r"\s{2,}", " ", text).strip()
 
+# ============ 好感度：AI 自己判断加不加，这里只给配额 + 兜底削平 ============
+_FAVOR_TAG_RE = re.compile(r"[\[【（(]\s*好感(?:度)?\s*[:：]?\s*([+-]?\d{1,2})\s*[\]】）)]")
+
+
+def _wordlib_module():
+    """拿到同进程里的 wordlib 模块（它负责好感度落盘与上限）"""
+    try:
+        import sys as _sys
+        return _sys.modules.get("wordlib") or _sys.modules.get("plugins.wordlib")
+    except Exception:
+        return None
+
+
+def _favor_block(event, user_id, nick, weight=1.0):
+    """把「今天还能给这个人加多少分/几次、单次最多几分」写给 AI，让它自己判断加不加。"""
+    try:
+        if user_id is None:
+            return ""
+        if _is_own_bot(user_id):
+            return ""
+        wl = _wordlib_module()
+        if wl is None or not hasattr(wl, "favor_quota"):
+            return ""
+        if weight < 1.0:
+            return ("\n\n[好感度]\n这个人刚才在刷屏/复读，本次**不要**加好感度，也不要提这件事。")
+        q = wl.favor_quota(user_id)
+        if q.get("points_left", 0) <= 0 or q.get("times_left", 0) <= 0:
+            return ("\n\n[好感度]\n今天你已经给这个人加满了好感度"
+                    f"（上限 {q.get('daily')} 分 / {q.get('times')} 次），本次不要再加，也不要提这件事。")
+        who = nick or "对方"
+        return (
+            "\n\n[好感度]\n"
+            f"你可以给 {who} 加好感度来表示欣赏——加不加、加几分**由你自己判断**。\n"
+            f"今天还能给 ta 加：**{q['points_left']} 分**、**{q['times_left']} 次**，单次最多 **{q['per_max']} 分**。\n"
+            "什么时候值得加：这句话让你被哄到/被照顾到/聊得真诚有趣、ta 对你好。\n"
+            "什么时候别加：敷衍、复读、刷屏、纯表情/纯符号、骂人、只叫名字、明显在凑数。\n"
+            f"要加的时候，在回复**最后**单独写一行 `[好感:+N]`（N 是 1~{q['per_max']} 的整数）；"
+            "不想加就完全不写。这一行会被系统删掉，对方看不到。\n"
+            "不要在正文里解释、提“好感度”三个字，也不要每次都加。"
+        )
+    except Exception:
+        return ""
+
+
+def _extract_favor(text):
+    """从回复里抽出 [好感:+N] 标记并删掉它。返回 (干净文本, 申请分数合计)"""
+    if not text:
+        return text, 0
+    try:
+        hits = list(_FAVOR_TAG_RE.finditer(text))
+        if not hits:
+            return text, 0
+        total = sum(int(h.group(1)) for h in hits)
+        clean = _FAVOR_TAG_RE.sub("", text)
+        clean = re.sub(r"[ \t]+\n", "\n", clean)
+        clean = re.sub(r"\n{3,}", "\n\n", clean).strip()
+        return clean, max(0, total)
+    except Exception:
+        return text, 0
+
+
+def _apply_favor(event, user_id, delta):
+    """落实好感度加分（wordlib 会再按单次/每日上限削一次）"""
+    if not delta or user_id is None:
+        return 0
+    try:
+        if _is_own_bot(user_id):
+            return 0
+        # 主人也照常能拿好感度（只是不会被当成刷分），所以这里不豁免主人
+        wl = _wordlib_module()
+        if wl is None or not hasattr(wl, "award_favor"):
+            return 0
+        added = wl.award_favor(user_id, delta, reason="AI判断")
+        if added:
+            print(f"[AI对话] 好感度 +{added}（AI 申请 {delta}）：{user_id}")
+        else:
+            print(f"[AI对话] 好感度未加（AI 申请 {delta}，配额已满或被削平）：{user_id}")
+        return added
+    except Exception as e:
+        print(f"[AI对话] 好感度处理失败: {e}")
+        return 0
+
 def _bump_acc(event):
     """每条真人消息累加一个随机浮点；累计到阈值就返回 True 并归零（相当于"攒够了，插一句"）。
 
@@ -2986,6 +3075,15 @@ def _process_ai_item(event, text, clean_text, images, user_id, has_image,
 
         add_to_history(event, "assistant", response, triggered=True, user_id=user_id)
 
+        # 好感度标记：[好感:+N] 是给系统的指令，必须从正文里摘掉再发（对方不该看到）
+        _favor_delta = 0
+        try:
+            response, _favor_delta = _extract_favor(response)
+            if _favor_delta:
+                print(f"[AI对话] AI 申请好感度 +{_favor_delta}")
+        except Exception as _e:
+            print(f"[AI对话] 好感度标记解析失败（忽略）: {_e}")
+
         # 降频状态：回复里不点名/@对方 —— AI 互踢靠「艾特」和「叫名字」唤醒对面，
         # 把这两个掐掉，对面就听不到自己名字了（正常聊天不启用，只在权重 < 1 时生效）
         try:
@@ -3021,6 +3119,9 @@ def _process_ai_item(event, text, clean_text, images, user_id, has_image,
             segs = _build_segments(part, session_key, budget)
             _send_segments(event, segs)
             print(f"[AI对话] 发送: {part}")
+        # 回复真的发出去了，才落实好感度（wordlib 会按单次/每日上限再削一层）
+        if _favor_delta:
+            _apply_favor(event, user_id, _favor_delta)
     except Exception as e:
         print(f"[AI对话] AI处理异常: {e}")
         _notify_master(f"处理异常（{get_session_key(event)}）：{e}", key=get_session_key(event))
