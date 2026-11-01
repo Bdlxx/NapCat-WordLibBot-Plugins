@@ -71,7 +71,7 @@ __config_schema__ = {
         "options": [{"value": "normal", "label": "普通模式（只认 @ 与唤醒词）"},
                     {"value": "pseudo", "label": "伪人模式（普通模式 + 被回复触发 + 随机接话）"}],
         "help": "普通模式：被 @ 或消息里出现机器人名字才回；伪人模式：额外允许「有人回复机器人」+「随机接话（浮点累积）」两种触发。"
-                "两种模式都带「续接窗口」（刚回过的人接着说也会回）。只影响触发与提示词，不影响表情包/语音能力",
+                "续接窗口（刚回过的人接着说也会回）**只在伪人模式生效**；普通模式只认 @ 与唤醒词。只影响触发与提示词，不影响表情包/语音能力",
         "default": "normal",
     },
     "enabled": {
@@ -281,7 +281,7 @@ __config_schema__ = {
     "msg_mode_off": {
         "type": "text", "label": "关闭伪人模式提示", "group": "回复模板",
         "path": "messages.mode_off", "help": "无占位符",
-        "default": "已切回普通模式：只认 @ 和叫名字（另有续接窗口）",
+        "default": "已切回普通模式：只认 @ 和叫名字",
     },
     "msg_switch_glm": {
         "type": "text", "label": "切换 GLM 成功", "group": "回复模板",
@@ -2252,7 +2252,7 @@ def _cmd_mode_normal(event, raw, kw):
     """关闭伪人模式（= chat_mode: normal）"""
     CONFIG["chat_mode"] = "normal"
     save_config()
-    send_message(event, msg("mode_off", "已切回普通模式：只认 @ 和叫名字（另有续接窗口）"))
+    send_message(event, msg("mode_off", "已切回普通模式：只认 @ 和叫名字"))
     return True
 
 
@@ -2550,7 +2550,7 @@ def handle(event):
         print(f"[AI对话] 随机接话命中（累积到 {CONFIG.get('random_reply_acc_threshold')}）: {(text or '')[:24]}")
         triggered = True
         trigger_kind = "random"
-    elif not _peer_bot and _is_followup(event):
+    elif mode == "pseudo" and not _peer_bot and _is_followup(event):
         print(f"[AI对话] 续接触发（刚回过的同一个人）: {text[:24] if text else ''}")
         triggered = True
         trigger_kind = "followup"
