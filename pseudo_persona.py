@@ -1896,18 +1896,20 @@ def build_system_prompt(user_id=None, event=None, additional_user_ids=None, cont
     # 不可通过配置修改，保障行为规范稳定
     combined += "\n\n[系统补充指令]\n" + _supplement_instructions(mode)
 
-    # ===== 本次触发方式（放在最末 = 离生成最近，权重最高）=====
-    # 随机接话时"没人叫你"，不说清楚模型就会把别人之间的对话当成在问自己
-    _trigger_hint = _trigger_block(trigger, nick, mentions, prev_name)
-    if _trigger_hint:
-        combined += "\n\n" + _trigger_hint
-
-    # ===== 好感度：告诉 AI 今天还能给这个人加多少，让它自己判断（降频中的人不给）=====
+    # ===== 好感度：只给「今天还能记几分」，并且明确"不要影响回复本身"（降频中的人不给）=====
+    # 放在触发说明**之前**：触发/对象识别才是要压在最末、权重最高的东西，
+    # 好感度这种东西不能抢它的位置（否则模型会为了记账而跑偏）。
     try:
         _fav_w, _ = _weight_for(event, user_id) if event is not None else (1.0, 0)
     except Exception:
         _fav_w = 1.0
     combined += _favor_block(event, user_id, nick, _fav_w)
+
+    # ===== 本次触发方式（放在最末 = 离生成最近，权重最高）=====
+    # 随机接话时"没人叫你"，不说清楚模型就会把别人之间的对话当成在问自己
+    _trigger_hint = _trigger_block(trigger, nick, mentions, prev_name)
+    if _trigger_hint:
+        combined += "\n\n" + _trigger_hint
 
     combined = combined.replace("[nick]", nick or "对方")
     return combined
@@ -2742,16 +2744,16 @@ def _favor_block(event, user_id, nick, weight=1.0):
         if q.get("points_left", 0) <= 0 or q.get("times_left", 0) <= 0:
             return ("\n\n[好感度]\n今天你已经给这个人加满了好感度"
                     f"（上限 {q.get('daily')} 分 / {q.get('times')} 次），本次不要再加，也不要提这件事。")
-        who = nick or "对方"
+        # 注意：这一块**不能影响回复本身**。只给数字与格式，不给"讨好才能加分"的暗示；
+        # 也不告诉它对方现有好感度（否则会对不同人区别对待）。
         return (
-            "\n\n[好感度]\n"
-            f"你可以给 {who} 加好感度来表示欣赏——加不加、加几分**由你自己判断**。\n"
-            f"今天还能给 ta 加：**{q['points_left']} 分**、**{q['times_left']} 次**，单次最多 **{q['per_max']} 分**。\n"
-            "什么时候值得加：这句话让你被哄到/被照顾到/聊得真诚有趣、ta 对你好。\n"
-            "什么时候别加：敷衍、复读、刷屏、纯表情/纯符号、骂人、只叫名字、明显在凑数。\n"
-            f"要加的时候，在回复**最后**单独写一行 `[好感:+N]`（N 是 1~{q['per_max']} 的整数）；"
-            "不想加就完全不写。这一行会被系统删掉，对方看不到。\n"
-            "不要在正文里解释、提“好感度”三个字，也不要每次都加。"
+            "\n\n[好感度标注 · 内部记账，与你的回复内容无关]\n"
+            "**先照常回复**：语气、长度、称呼、态度一律按你本来的性格，不要为了这个标注改变任何东西；\n"
+            "也不要因为对方好感度高就亲昵、低就冷淡——你此刻的态度与好感度无关。\n"
+            f"回复写完后，如果你觉得这次交流值得记一笔，可以在**最末尾另起一行**写 `[好感:+N]`"
+            f"（N 是 1~{q['per_max']} 的整数）；今天还能记 **{q['points_left']} 分**、**{q['times_left']} 次**。\n"
+            "不值得就完全不写。这一行只给系统看，会被删掉，**不要在正文里提到好感度、也不要写理由**。\n"
+            "不写也完全没问题——不要为了加分而讨好、卖萌或加戏。"
         )
     except Exception:
         return ""
@@ -3081,6 +3083,10 @@ def _process_ai_item(event, text, clean_text, images, user_id, has_image,
             response, _favor_delta = _extract_favor(response)
             if _favor_delta:
                 print(f"[AI对话] AI 申请好感度 +{_favor_delta}")
+            if not (response or "").strip():
+                # 模型只吐了个标记、没有正文：宁可这次不发，也不要发一条空消息
+                print("[AI对话] 回复正文为空（只有好感度标记）→ 本次不发送")
+                return
         except Exception as _e:
             print(f"[AI对话] 好感度标记解析失败（忽略）: {_e}")
 
