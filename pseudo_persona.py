@@ -20,6 +20,22 @@ __plugin_author__ = "NapCat-WordLibBot"
 # ============================================================================
 
 __config_schema__ = {
+    "chat_mode": {
+        "type": "select", "label": "对话模式", "group": "常用",
+        "path": "chat_mode",
+        "options": [{"value": "normal", "label": "普通模式（只认 @ 与唤醒词）"},
+                    {"value": "pseudo", "label": "伪人模式（普通模式 + 被回复触发 + 随机接话）"}],
+        "help": "**这是全局默认**：私聊生效，没单独设置过的群也用它。每个群可以单独设（「群聊管理」的 AI 对话模式开关，"
+                "或群里发「开启伪人模式 / 关闭伪人模式」），群设置优先。普通模式：只认 @ 与唤醒词；"
+                "伪人模式：额外允许「被回复」「随机接话」「续接窗口（刚回过的人接着说）」。只影响触发与提示词，不影响表情包/语音能力",
+        "default": "normal",
+    },
+    "enabled": {
+        "type": "bool", "label": "插件总开关", "group": "常用",
+        "path": "enabled",
+        "help": "全局总开关，关闭后群聊/私聊都不再回复（分群开关见「群组管理」）",
+        "default": True,
+    },
     # ---------------- 模型与凭证（current_model / glm.* / gemini.*）----------------
     "current_model": {
         "type": "select", "label": "当前 AI 模型", "group": "模型与凭证",
@@ -65,22 +81,6 @@ __config_schema__ = {
     },
 
     # ---------------- 参数 ----------------
-    "chat_mode": {
-        "type": "select", "label": "对话模式", "group": "模式",
-        "path": "chat_mode",
-        "options": [{"value": "normal", "label": "普通模式（只认 @ 与唤醒词）"},
-                    {"value": "pseudo", "label": "伪人模式（普通模式 + 被回复触发 + 随机接话）"}],
-        "help": "**这是全局默认**：私聊生效，没单独设置过的群也用它。每个群可以单独设（「群聊管理」的 AI 对话模式开关，"
-                "或群里发「开启伪人模式 / 关闭伪人模式」），群设置优先。普通模式：只认 @ 与唤醒词；"
-                "伪人模式：额外允许「被回复」「随机接话」「续接窗口（刚回过的人接着说）」。只影响触发与提示词，不影响表情包/语音能力",
-        "default": "normal",
-    },
-    "enabled": {
-        "type": "bool", "label": "插件总开关", "group": "参数",
-        "path": "enabled",
-        "help": "全局总开关，关闭后群聊/私聊都不再回复（分群开关见「群组管理」）",
-        "default": True,
-    },
     "reply_probability": {
         "type": "number", "label": "回复概率", "group": "普通模式",
         "path": "reply_probability", "min": 0, "max": 1, "unit": "0~1",
@@ -89,12 +89,14 @@ __config_schema__ = {
     },
     # ---------------- 自适应降频（2026-11-02，方案 A：滑动窗口） ----------------
     "free_n": {
+        "advanced": True,
         "type": "number", "label": "窗口内前几次不降频", "group": "降频",
         "path": "free_n", "readonly": True, "min": 0, "max": 100, "step": 1, "unit": "次",
         "help": "同一个群里同一个人，在窗口时长内触发你的次数不超过这个数，就按原概率回复。",
         "default": 6,
     },
     "window_sec": {
+        "advanced": True,
         "type": "number", "label": "降频窗口时长", "group": "降频",
         "path": "window_sec", "readonly": True, "min": 30, "max": 3600, "step": 30, "unit": "秒",
         "help": "统计「最近 N 秒内他触发了我几次」的窗口。超过 free_n 次开始降权；"
@@ -102,6 +104,7 @@ __config_schema__ = {
         "default": 300,
     },
     "step": {
+        "advanced": True,
         "type": "number", "label": "每次超阈值降多少", "group": "降频",
         "path": "step", "readonly": True, "min": 0.001, "max": 0.5, "step": 0.001, "unit": "权重",
         "help": "**自减步长**：窗口内触发次数超过 free_n 后，每多一次就 权重 − 这个值（可细到 0.001）。"
@@ -109,6 +112,7 @@ __config_schema__ = {
         "default": 0.03,
     },
     "recover": {
+        "advanced": True,
         "type": "number", "label": "每次回升多少", "group": "降频",
         "path": "recover", "readonly": True, "min": 0.001, "max": 0.5, "step": 0.001, "unit": "权重",
         "help": "**自增步长**：他的节奏缓下来（窗口内次数回到 free_n 以内）后，每次触发把权重加回一点；"
@@ -116,12 +120,14 @@ __config_schema__ = {
         "default": 0.02,
     },
     "recover_sec": {
+        "advanced": True,
         "type": "number", "label": "多久自动回升一次", "group": "降频",
         "path": "recover_sec", "readonly": True, "min": 5, "max": 3600, "step": 5, "unit": "秒",
         "help": "对方完全没动静时，每过这么久权重 +recover（默认 60 秒 +0.02，约 50 分钟从 0.2 回到 1.0）。",
         "default": 60,
     },
     "floor": {
+        "advanced": True,
         "type": "number", "label": "权重下限", "group": "降频",
         "path": "floor", "readonly": True, "min": 0, "max": 1, "step": 0.01, "unit": "权重",
         "help": "再能刷也不会低于这个权重（0=可以降到完全不回，0.2=最差时约 1/5 概率回）。"
@@ -129,6 +135,7 @@ __config_schema__ = {
         "default": 0.2,
     },
     "gap_base": {
+        "advanced": True,
         "type": "number", "label": "最小回复间隔", "group": "降频",
         "path": "gap_base", "readonly": True, "min": 0, "max": 600, "step": 5, "unit": "秒",
         "help": "只对**已进入降频**的人生效：两次回复至少隔 gap_base ÷ 权重 秒（权重 0.2 → 100 秒）。"
@@ -136,6 +143,7 @@ __config_schema__ = {
         "default": 20,
     },
     "strip_peer_names": {
+        "advanced": True,
         "type": "bool", "label": "降频时不在回复里点名对方", "group": "降频",
         "path": "strip_peer_names", "readonly": True,
         "help": "进入降频后，把回复里出现的「最近说过话的人的名字」和 @对方 去掉——"
@@ -248,81 +256,97 @@ __config_schema__ = {
 
     # ---------------- 指令（commands.*）----------------
     "cmd_enable": {
+        "advanced": True,
         "type": "text", "label": "开启 AI 对话", "group": "指令",
         "path": "commands.enable", "default": "开启AI对话",
         "help": "触发词：后缀匹配，仅主人可用；群内=开本群，私聊=开全局",
     },
     "cmd_disable": {
+        "advanced": True,
         "type": "text", "label": "关闭 AI 对话", "group": "指令",
         "path": "commands.disable", "default": "关闭AI对话",
         "help": "触发词：后缀匹配，仅主人可用；群内=关本群，私聊=关全局",
     },
     "cmd_mode_on": {
+        "advanced": True,
         "type": "text", "label": "开启伪人模式", "group": "指令",
         "path": "commands.mode_on", "default": "开启伪人模式",
         "help": "触发词：整条消息全等，仅主人可用（只改对话模式，不等于开启插件）",
     },
     "cmd_mode_off": {
+        "advanced": True,
         "type": "text", "label": "关闭伪人模式", "group": "指令",
         "path": "commands.mode_off", "default": "关闭伪人模式",
         "help": "触发词：整条消息全等，仅主人可用（切回普通模式）",
     },
     "cmd_switch_glm": {
+        "advanced": True,
         "type": "text", "label": "切换 GLM", "group": "指令",
         "path": "commands.switch_glm", "default": "切换glm",
         "help": "触发词：整条消息全等，仅主人可用",
     },
     "cmd_switch_glm_alt": {
+        "advanced": True,
         "type": "text", "label": "切换 GLM（备用词）", "group": "指令",
         "path": "commands.switch_glm_alt", "default": "用glm",
         "help": "触发词：整条消息全等，仅主人可用",
     },
     "cmd_switch_gemini": {
+        "advanced": True,
         "type": "text", "label": "切换 Gemini", "group": "指令",
         "path": "commands.switch_gemini", "default": "切换gemini",
         "help": "触发词：整条消息全等，仅主人可用",
     },
     "cmd_switch_gemini_alt": {
+        "advanced": True,
         "type": "text", "label": "切换 Gemini（备用词）", "group": "指令",
         "path": "commands.switch_gemini_alt", "default": "用gemini",
         "help": "触发词：整条消息全等，仅主人可用",
     },
     "cmd_current_model": {
+        "advanced": True,
         "type": "text", "label": "查看当前模型", "group": "指令",
         "path": "commands.current_model", "default": "当前模型",
         "help": "触发词：整条消息全等，仅主人可用",
     },
     "cmd_current_model_alt": {
+        "advanced": True,
         "type": "text", "label": "查看当前模型（备用词）", "group": "指令",
         "path": "commands.current_model_alt", "default": "用什么模型",
         "help": "触发词：整条消息全等，仅主人可用",
     },
     "cmd_clear_history": {
+        "advanced": True,
         "type": "text", "label": "清除会话历史", "group": "指令",
         "path": "commands.clear_history", "default": "清除历史",
         "help": "触发词：整条消息全等，仅主人可用（只清当前会话）",
     },
     "cmd_clear_history_alt": {
+        "advanced": True,
         "type": "text", "label": "清除会话历史（备用词1）", "group": "指令",
         "path": "commands.clear_history_alt", "default": "清空历史",
         "help": "触发词：整条消息全等，仅主人可用",
     },
     "cmd_clear_history_alt2": {
+        "advanced": True,
         "type": "text", "label": "清除会话历史（备用词2）", "group": "指令",
         "path": "commands.clear_history_alt2", "default": "清空记忆",
         "help": "触发词：整条消息全等，仅主人可用",
     },
     "cmd_clear_all": {
+        "advanced": True,
         "type": "text", "label": "清除所有历史", "group": "指令",
         "path": "commands.clear_all", "default": "清除所有历史",
         "help": "触发词：整条消息全等，仅主人可用（清空全部会话）",
     },
     "cmd_clear_all_alt": {
+        "advanced": True,
         "type": "text", "label": "清除所有历史（备用词1）", "group": "指令",
         "path": "commands.clear_all_alt", "default": "清空所有历史",
         "help": "触发词：整条消息全等，仅主人可用",
     },
     "cmd_clear_all_alt2": {
+        "advanced": True,
         "type": "text", "label": "清除所有历史（备用词2）", "group": "指令",
         "path": "commands.clear_all_alt2", "default": "清空所有记忆",
         "help": "触发词：整条消息全等，仅主人可用",
@@ -330,52 +354,62 @@ __config_schema__ = {
 
     # ---------------- 回复模板（messages.*）----------------
     "msg_mode_on": {
+        "advanced": True,
         "type": "text", "label": "开启伪人模式提示", "group": "回复模板",
         "path": "messages.mode_on", "help": "无占位符",
         "default": "已开启伪人模式：被 @、叫名字、被回复、随机接话都会回",
     },
     "msg_mode_off": {
+        "advanced": True,
         "type": "text", "label": "关闭伪人模式提示", "group": "回复模板",
         "path": "messages.mode_off", "help": "无占位符",
         "default": "已切回普通模式：只认 @ 和叫名字",
     },
     "msg_switch_glm": {
+        "advanced": True,
         "type": "text", "label": "切换 GLM 成功", "group": "回复模板",
         "path": "messages.switch_glm", "help": "可用占位符：{model}=实际切换到的型号",
         "default": "已切换到 {model}",
     },
     "msg_switch_gemini": {
+        "advanced": True,
         "type": "text", "label": "切换 Gemini 成功", "group": "回复模板",
         "path": "messages.switch_gemini", "help": "可用占位符：{model}=实际切换到的型号",
         "default": "已切换到 {model}",
     },
     "msg_current_model": {
+        "advanced": True,
         "type": "text", "label": "当前模型回复", "group": "回复模板",
         "path": "messages.current_model",
         "help": "占位符：{model} 模型名（花括号写法，勿改成方括号）",
         "default": "当前模型: {model}",
     },
     "msg_history_cleared": {
+        "advanced": True,
         "type": "text", "label": "会话历史已清除", "group": "回复模板",
         "path": "messages.history_cleared", "help": "无占位符",
         "default": "已清除当前会话历史",
     },
     "msg_all_history_cleared": {
+        "advanced": True,
         "type": "text", "label": "全部历史已清除", "group": "回复模板",
         "path": "messages.all_history_cleared", "help": "无占位符",
         "default": "已清除所有历史",
     },
     "msg_no_reply": {
+        "advanced": True,
         "type": "text", "label": "无回复兜底", "group": "回复模板",
         "path": "messages.no_reply", "help": "AI 返回空内容时的兜底话术；无占位符",
         "default": "唔...我好像有点累了，待会再聊吧~",
     },
     "msg_whats_up": {
+        "advanced": True,
         "type": "text", "label": "打招呼", "group": "回复模板",
         "path": "messages.whats_up", "help": "只叫机器人名字时的回复；无占位符",
         "default": "叫我干嘛呀~",
     },
     "msg_check_image": {
+        "advanced": True,
         "type": "text", "label": "看图提示", "group": "回复模板",
         "path": "messages.check_image", "help": "只发图片没配文字时的过渡语；无占位符",
         "default": "看看你发了什么图~",
