@@ -2810,8 +2810,7 @@ def _apply_favor(event, user_id, delta):
         added = wl.award_favor(user_id, delta, reason="AI判断")
         if added:
             print(f"[AI对话] 好感度 +{added}（AI 申请 {delta}）：{user_id}")
-        else:
-            print(f"[AI对话] 好感度未加（AI 申请 {delta}，配额已满或被削平）：{user_id}")
+        # 没加成（配额已满 / 被单次上限削成 0）属正常兜底，不刷日志
         return added
     except Exception as e:
         print(f"[AI对话] 好感度处理失败: {e}")
@@ -3103,15 +3102,9 @@ def _process_ai_item(event, text, clean_text, images, user_id, has_image,
             response, _favor_hits = _extract_favor(response)
             # 只有 QQ 与「本次对话对象」一致才认（旧写法没写 QQ 的才算给他自己）；
             # 写别人 / 写得对不上 → 一律忽略，避免"记错人"
-            _apply, _drop = [], []
-            for _qq, _n in (_favor_hits or []):
-                if _qq is None or str(_qq) == str(user_id):
-                    _apply.append(_n)
-                else:
-                    _drop.append((_qq, _n))
-            _favor_delta = sum(_apply)
-            if _drop:
-                print(f"[AI对话] 好感度标记里的 QQ 与对话对象不符，已忽略: {_drop}（对象 {user_id}）")
+            # 只认「本次对话对象」的标记；写别人/写错一律静默忽略（不打日志，免得刷屏）
+            _favor_delta = sum(_n for _qq, _n in (_favor_hits or [])
+                               if _qq is None or str(_qq) == str(user_id))
             if _favor_delta:
                 print(f"[AI对话] AI 申请好感度 +{_favor_delta}（{user_id}）")
             if not (response or "").strip():
