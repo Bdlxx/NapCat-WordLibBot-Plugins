@@ -87,6 +87,47 @@ __config_schema__ = {
         "help": "被 @ 或回复机器人时真正回复的概率（1=必定回复）；允许小数故未设步长",
         "default": 1,
     },
+    # ---------------- 自适应降频（2026-11-02，方案 A：滑动窗口） ----------------
+    "free_n": {
+        "type": "number", "label": "窗口内前几次不降频", "group": "降频",
+        "path": "free_n", "min": 0, "max": 100, "step": 1, "unit": "次",
+        "help": "同一个群里同一个人，在窗口时长内触发你的次数不超过这个数，就按原概率回复。",
+        "default": 6,
+    },
+    "window_sec": {
+        "type": "number", "label": "降频窗口时长", "group": "降频",
+        "path": "window_sec", "min": 30, "max": 3600, "step": 30, "unit": "秒",
+        "help": "统计「最近 N 秒内他触发了我几次」的窗口。超过 free_n 次开始降权；"
+                "他的消息滑出窗口后权重自动回升，不需要手动恢复。",
+        "default": 300,
+    },
+    "step": {
+        "type": "number", "label": "每超一次降多少", "group": "降频",
+        "path": "step", "min": 0.01, "max": 1, "step": 0.01, "unit": "权重",
+        "help": "权重 = 1 - step × (窗口内触发次数 - free_n)，不低于下限。0.15 时 1800 秒内第 7 次是 0.85、第 9 次 0.55。",
+        "default": 0.15,
+    },
+    "floor": {
+        "type": "number", "label": "权重下限", "group": "降频",
+        "path": "floor", "min": 0, "max": 1, "step": 0.01, "unit": "权重",
+        "help": "再能刷也不会低于这个权重（0=可以降到完全不回，0.2=最差时约 1/5 概率回）。"
+                "想彻底静默请看「主人标记 AI」。",
+        "default": 0.2,
+    },
+    "gap_base": {
+        "type": "number", "label": "最小回复间隔", "group": "降频",
+        "path": "gap_base", "min": 0, "max": 600, "step": 5, "unit": "秒",
+        "help": "只对**已进入降频**的人生效：两次回复至少隔 gap_base ÷ 权重 秒（权重 0.2 → 100 秒）。"
+                "正常权重 1.0 不受影响。",
+        "default": 20,
+    },
+    "strip_peer_names": {
+        "type": "bool", "label": "降频时不在回复里点名对方", "group": "降频",
+        "path": "strip_peer_names",
+        "help": "进入降频后，把回复里出现的「最近说过话的人的名字」和 @对方 去掉——"
+                "AI 互踢主要靠「艾特」和「叫名字」触发，卡掉这两个等于断了对面的唤醒路径。",
+        "default": True,
+    },
     "record_group_unrelated": {
         "type": "bool", "label": "记录无关群消息", "group": "参数",
         "path": "record_group_unrelated", "default": False,
@@ -1095,6 +1136,14 @@ CONFIG = {
 
     # 触发配置（random_* 只在伪人模式生效）
     "reply_probability": 1.0,
+    # 自适应降频（方案 A：滑动窗口）。权重 = 1 - step*(窗口内触发次数 - free_n)，夹在 [floor, 1]
+    # 同一群里同一个人刷得越快，权重越低；消息滑出窗口后自动回升；主人在任何时候都不降频
+    "free_n": 6,
+    "window_sec": 300,
+    "step": 0.15,
+    "floor": 0.2,
+    "gap_base": 20,                # 已降频时的最小回复间隔 = gap_base ÷ 权重（秒）
+    "strip_peer_names": True,      # 降频时在回复里去掉别人的名字/@，掐断对方的休眠词触发
     "random_reply_probability": True,          # 随机接话总开关（咸鱼那边填 0/1）
     # 随机接话（随机累积制，同咸鱼那套）：
     #   每来一条真人消息累加一个浮点（0 ~ random_reply_acc_max 的均匀随机），
@@ -1725,7 +1774,7 @@ def _supplement_instructions(mode=None):
 
 
 def build_system_prompt(user_id=None, event=None, additional_user_ids=None, context=None,
-                        trigger=None, mentions=None, prev_name=None):
+                        trigger=None, mentions=None, prev_name=None, mode=None):
     """构建系统提示（分层人设）：
     第一层：默认人设 —— 仅传递核心关键信息（身份/基础风格/图片评论/安全兜底），保障基础运行功能；
     第二层：自定义人格 —— user_persona / persona 存在时启用，并指示 AI 在此基础上做「深度人格特征判定」，
@@ -2045,7 +2094,7 @@ def _targets():
 
 
 def call_ai(prompt, context, images, user_id=None, event=None, trigger=None, mentions=None,
-            prev_name=None):
+            prev_name=None, mode=None):
     """调用 AI API，带自动容错：主模型 → 低价备选型号链 → 另一个槽位（都失败返回 None）"""
     global _active_model, _primary_fail_time
     primary = CONFIG.get("current_model", "gemini")
@@ -2071,7 +2120,7 @@ def call_ai(prompt, context, images, user_id=None, event=None, trigger=None, men
                                                 additional_user_ids=list(additional_ids),
                                                 context=context,
                                                 trigger=trigger, mentions=mentions,
-                                                prev_name=prev_name)
+                                                prev_name=prev_name, mode=mode)
             messages = [{"role": "system", "content": system_prompt}]
             messages.extend(context)
 
@@ -2459,6 +2508,110 @@ _acc = {}                             # 会话 -> 已累积的浮点（咸鱼那
 _acc_lock = threading.Lock()
 
 
+# ============ 自适应降频（方案 A：滑动窗口）============
+# 为什么要它：伪人模式下 AI 之间会「@/叫名字/被回复」互相踢，一晚上能连几十轮（线上实测 26 轮）。
+# 这里给每个「会话 + 人」记触发时间戳：窗口内超过 free_n 次就把回复权重逐次调低
+# （1 → 0.85 → 0.70 → 0.55 …），他的消息滑出窗口后权重自动回升；主人永远不降频。
+_recent_triggers = {}            # 会话 -> {qq: [ts, ...]}
+_recent_triggers_lock = threading.Lock()
+
+
+def _throttle_params():
+    try:
+        free_n = int(CONFIG.get("free_n", 6) or 0)
+        window = float(CONFIG.get("window_sec", 300) or 300)
+        step = float(CONFIG.get("step", 0.15) or 0.15)
+        floor = float(CONFIG.get("floor", 0.2) or 0.0)
+        gap_base = float(CONFIG.get("gap_base", 20) or 0)
+    except Exception:
+        free_n, window, step, floor, gap_base = 6, 300.0, 0.15, 0.2, 20.0
+    return max(0, free_n), max(30.0, window), min(1.0, max(0.01, step)), min(1.0, max(0.0, floor)), max(0.0, gap_base)
+
+
+def _note_trigger(event, user_id):
+    """记一次「他触发了你」。被降频丢弃的触发也算——他越刷，权重越低。"""
+    try:
+        key = get_session_key(event)
+        now = time.time()
+        _, window, _, _, _ = _throttle_params()
+        cut = now - max(window * 2, 600)
+        with _recent_triggers_lock:
+            d = _recent_triggers.setdefault(key, {})
+            arr = d.setdefault(str(user_id), [])
+            arr.append(now)
+            while arr and arr[0] < cut:
+                arr.pop(0)
+            if len(arr) > 500:
+                del arr[:-250]
+    except Exception:
+        pass
+
+
+def _weight_for(event, user_id):
+    """返回 (权重, 窗口内触发次数)。主人恒为 1.0。"""
+    try:
+        if is_master(event):
+            return 1.0, 0
+        free_n, window, step, floor, _ = _throttle_params()
+        key = get_session_key(event)
+        now = time.time()
+        with _recent_triggers_lock:
+            arr = list((_recent_triggers.get(key) or {}).get(str(user_id)) or [])
+        n = sum(1 for t in arr if now - t <= window)
+        if n <= free_n:
+            return 1.0, n
+        return max(floor, 1.0 - step * (n - free_n)), n
+    except Exception:
+        return 1.0, 0
+
+
+def _reply_gap_required(weight):
+    """已降频时两次回复至少要隔多久：gap_base ÷ 权重（权重越低越慢）"""
+    _, _, _, _, gap_base = _throttle_params()
+    if gap_base <= 0 or weight >= 1.0:
+        return 0.0
+    return gap_base / max(0.05, weight)
+
+
+def _last_reply_of(event):
+    """上一次回这个人的时间戳（没有就 None）"""
+    try:
+        with _last_reply_lock:
+            rec = _last_reply.get(get_session_key(event))
+        return float(rec[1]) if rec else None
+    except Exception:
+        return None
+
+
+def _strip_peer_names(text, event):
+    """降频时把回复里的「别人名字 / @别人」去掉。
+
+    AI 互踢主要靠「艾特」和「叫名字」唤醒对方（线上实测：我方 403 条里有 42 条直接喊 Claude 名字）。
+    只在降频状态调用，正常聊天照常点名。
+    """
+    if not text or not bool(CONFIG.get("strip_peer_names", True)):
+        return text
+    try:
+        bot_name = (CONFIG.get("bot_name") or get_bot_name() or "").strip()
+        masters = set()
+        raw_masters = get_config("MASTER_QQ", []) or []
+        if not isinstance(raw_masters, (list, tuple, set)):
+            raw_masters = [raw_masters]
+        masters = {str(m).strip() for m in raw_masters}
+        with _recent_speakers_lock:
+            buf = list(_recent_speakers.get(get_session_key(event)) or [])
+        names = {str(n).strip() for uid, n, _ts in buf
+                 if n and str(n).strip() and str(uid) not in masters}
+    except Exception:
+        return text
+    for n in names:
+        if not n or n == bot_name or len(n) < 2:
+            continue
+        text = re.sub(r"[（(]\s*@?" + re.escape(n) + r"\s*[）)]", "", text)   # (@Claude) / （Claude）
+        text = re.sub(r"@\s*" + re.escape(n), "", text)                          # @Claude
+        text = text.replace(n, "")                                               # 直呼名字
+    return re.sub(r"\s{2,}", " ", text).strip()
+
 def _bump_acc(event):
     """每条真人消息累加一个随机浮点；累计到阈值就返回 True 并归零（相当于"攒够了，插一句"）。
 
@@ -2597,7 +2750,23 @@ def handle(event):
                        triggered=triggered, has_image=has_image, user_id=user_id)
         return False
 
-    if random.random() > CONFIG.get("reply_probability", 1.0):
+    # ===== 自适应降频（方案 A）：基础概率 × 滑动窗口权重，主人在此之上直接放行 =====
+    _note_trigger(event, user_id)
+    _weight, _seen = _weight_for(event, user_id)
+    if _weight < 1.0:
+        _gap = _reply_gap_required(_weight)
+        _last = _last_reply_of(event)
+        if _gap > 0 and _last is not None and (time.time() - _last) < _gap:
+            print(f"[AI对话] 降频跳过：{user_id} 窗口内第 {_seen} 次触发 → 权重 {_weight:.2f}，"
+                  f"距上次回复 {(time.time() - _last):.0f}s < 要求 {_gap:.0f}s")
+            add_to_history(event, "user", _text_with_mentions(text or "[图片]", mentions),
+                           triggered=triggered, has_image=has_image, user_id=user_id)
+            return False
+    _p_eff = max(0.0, min(1.0, float(CONFIG.get("reply_probability", 1.0) or 0) * _weight))
+    if random.random() > _p_eff:
+        if _weight < 1.0:
+            print(f"[AI对话] 降频跳过：{user_id} 窗口内第 {_seen} 次触发 → 权重 {_weight:.2f}，"
+                  f"实际概率 {_p_eff:.2f}")
         add_to_history(event, "user", _text_with_mentions(text or "[图片]", mentions),
                        triggered=triggered, has_image=has_image, user_id=user_id)
         return False
@@ -2703,7 +2872,8 @@ def _process_ai_item(event, text, clean_text, images, user_id, has_image,
                         print(f"[AI对话] 上一条是 {prev_name}({_prev_uid}) 说的")
 
         response, error = call_ai(_user_text, context, images, user_id=user_id, event=event,
-                                  trigger=trigger_kind, mentions=mentions, prev_name=prev_name)
+                                  trigger=trigger_kind, mentions=mentions, prev_name=prev_name,
+                                  mode=_chat_mode_for(event))
         if error:
             print(f"[AI对话] {error}")
             _notify_master(f"AI 调用失败（{get_session_key(event)}）：{error}", key=get_session_key(event))
@@ -2722,6 +2892,21 @@ def _process_ai_item(event, text, clean_text, images, user_id, has_image,
         response = re.sub(r'[ \t]+', ' ', response).strip()
 
         add_to_history(event, "assistant", response, triggered=True, user_id=user_id)
+
+        # 降频状态：回复里不点名/@对方 —— AI 互踢靠「艾特」和「叫名字」唤醒对面，
+        # 把这两个掐掉，对面就听不到自己名字了（正常聊天不启用，只在权重 < 1 时生效）
+        try:
+            _w_now, _ = _weight_for(event, user_id)
+            if _w_now < 1.0 and bool(CONFIG.get("strip_peer_names", True)):
+                _before = response
+                _stripped = [_strip_peer_names(p, event) for p in split_msg(response)]
+                _stripped = [p for p in (_stripped or []) if p.strip()]
+                if _stripped:
+                    response = "|#|#|".join(_stripped)
+                if _before.strip() != response.strip():
+                    print(f"[AI对话] 降频去点名：{_before[:40]!r} → {response[:40]!r}")
+        except Exception as _e:
+            print(f"[AI对话] 去点名失败（忽略）: {_e}")
 
         parts = split_msg(response)
         session_key = get_session_key(event)
