@@ -102,10 +102,24 @@ __config_schema__ = {
         "default": 300,
     },
     "step": {
-        "type": "number", "label": "每超一次降多少", "group": "降频",
-        "path": "step", "min": 0.01, "max": 1, "step": 0.01, "unit": "权重",
-        "help": "权重 = 1 - step × (窗口内触发次数 - free_n)，不低于下限。0.15 时 1800 秒内第 7 次是 0.85、第 9 次 0.55。",
-        "default": 0.15,
+        "type": "number", "label": "每次超阈值降多少", "group": "降频",
+        "path": "step", "min": 0.001, "max": 0.5, "step": 0.001, "unit": "权重",
+        "help": "**自减步长**：窗口内触发次数超过 free_n 后，每多一次就 权重 − 这个值（可细到 0.001）。"
+                "0.03 时第 7 次 0.97、第 12 次 0.82、连刷 27 次才到底 0.2 —— 平滑，不会一脚踩到谷底。",
+        "default": 0.03,
+    },
+    "recover": {
+        "type": "number", "label": "每次回升多少", "group": "降频",
+        "path": "recover", "min": 0.001, "max": 0.5, "step": 0.001, "unit": "权重",
+        "help": "**自增步长**：他的节奏缓下来（窗口内次数回到 free_n 以内）后，每次触发把权重加回一点；"
+                "完全没动静时也按 recover_sec 的节奏自动回升，直到 1.0。",
+        "default": 0.02,
+    },
+    "recover_sec": {
+        "type": "number", "label": "多久自动回升一次", "group": "降频",
+        "path": "recover_sec", "min": 5, "max": 3600, "step": 5, "unit": "秒",
+        "help": "对方完全没动静时，每过这么久权重 +recover（默认 60 秒 +0.02，约 50 分钟从 0.2 回到 1.0）。",
+        "default": 60,
     },
     "floor": {
         "type": "number", "label": "权重下限", "group": "降频",
@@ -1140,7 +1154,9 @@ CONFIG = {
     # 同一群里同一个人刷得越快，权重越低；消息滑出窗口后自动回升；主人在任何时候都不降频
     "free_n": 6,
     "window_sec": 300,
-    "step": 0.15,
+    "step": 0.03,                  # 每次超阈值触发，权重 -= step（可细到 0.001，越小越平滑）
+    "recover": 0.02,               # 节奏缓下来后每次触发 +recover；长时间没动静也按它回升
+    "recover_sec": 60,             # 完全没动静时，每这么久自动 +recover(秒)
     "floor": 0.2,
     "gap_base": 20,                # 已降频时的最小回复间隔 = gap_base ÷ 权重（秒）
     "strip_peer_names": True,      # 降频时在回复里去掉别人的名字/@，掐断对方的休眠词触发
@@ -2508,66 +2524,106 @@ _acc = {}                             # 会话 -> 已累积的浮点（咸鱼那
 _acc_lock = threading.Lock()
 
 
-# ============ 自适应降频（方案 A：滑动窗口）============
-# 为什么要它：伪人模式下 AI 之间会「@/叫名字/被回复」互相踢，一晚上能连几十轮（线上实测 26 轮）。
-# 这里给每个「会话 + 人」记触发时间戳：窗口内超过 free_n 次就把回复权重逐次调低
-# （1 → 0.85 → 0.70 → 0.55 …），他的消息滑出窗口后权重自动回升；主人永远不降频。
-_recent_triggers = {}            # 会话 -> {qq: [ts, ...]}
+# ============ 自适应降频（滑动窗口 + 自增自减权重）============
+# 为什么要它：伪人模式下 AI 之间会「@/叫名字/被回复」互相踢（线上实测一段 26 回合）。
+# 这里给每个「会话 + 人」维护一个**可自定义步长的浮点权重**：
+#   · 窗口内触发次数超过 free_n → 每次再触发就 w -= step（默认 0.03，可改到 0.001 级别）
+#   · 他的节奏缓下来（窗口内次数回落到 free_n 以内）→ 每次触发 w += recover
+#   · 长时间不说话 → 每 recover_sec 秒自动 w += recover
+# 权重夹在 [floor, 1.0]；主人的权重恒为 1.0。
+# 为什么不再用「1 - step×(n-free_n)」那种一次算到位的式子：那等于每多一次触发就一次性掉
+# 好几分（0.85→0.70→0.55），降得太狠、也不可细调；增量式每次只动一个小浮点，平滑得多。
+_recent_triggers = {}            # 会话 -> {qq: [ts, ...]}（窗口内的触发时间戳）
+_weights = {}                    # 会话 -> {qq: [权重, 最后更新时间]}（自增自减的当前值）
 _recent_triggers_lock = threading.Lock()
 
 
 def _throttle_params():
+    """(free_n, window_sec, step, floor, gap_base, recover, recover_sec)"""
     try:
         free_n = int(CONFIG.get("free_n", 6) or 0)
         window = float(CONFIG.get("window_sec", 300) or 300)
-        step = float(CONFIG.get("step", 0.15) or 0.15)
+        step = float(CONFIG.get("step", 0.03) or 0.03)
         floor = float(CONFIG.get("floor", 0.2) or 0.0)
         gap_base = float(CONFIG.get("gap_base", 20) or 0)
+        recover = float(CONFIG.get("recover", 0.02) or 0.02)
+        recover_sec = float(CONFIG.get("recover_sec", 60) or 60)
     except Exception:
-        free_n, window, step, floor, gap_base = 6, 300.0, 0.15, 0.2, 20.0
-    return max(0, free_n), max(30.0, window), min(1.0, max(0.01, step)), min(1.0, max(0.0, floor)), max(0.0, gap_base)
+        free_n, window, step, floor, gap_base, recover, recover_sec = 6, 300.0, 0.03, 0.2, 20.0, 0.02, 60.0
+    return (max(0, free_n), max(30.0, window),
+            min(0.5, max(0.001, step)), min(1.0, max(0.0, floor)),
+            max(0.0, gap_base),
+            min(0.5, max(0.001, recover)), max(5.0, recover_sec))
+
+
+def _window_count(key, user_id, window, now=None):
+    now = now or time.time()
+    with _recent_triggers_lock:
+        arr = list((_recent_triggers.get(key) or {}).get(str(user_id)) or [])
+    return sum(1 for t in arr if now - t <= window)
 
 
 def _note_trigger(event, user_id):
-    """记一次「他触发了你」。被降频丢弃的触发也算——他越刷，权重越低。"""
+    """记一次触发，并**自减/自增**权重。返回 (当前权重, 窗口内触发次数)。"""
     try:
         key = get_session_key(event)
         now = time.time()
-        _, window, _, _, _ = _throttle_params()
-        cut = now - max(window * 2, 600)
+        free_n, window, step, floor, _gap, recover, recover_sec = _throttle_params()
         with _recent_triggers_lock:
             d = _recent_triggers.setdefault(key, {})
             arr = d.setdefault(str(user_id), [])
             arr.append(now)
+            cut = now - max(window * 2, 600)
             while arr and arr[0] < cut:
                 arr.pop(0)
             if len(arr) > 500:
                 del arr[:-250]
+            n = sum(1 for t in arr if now - t <= window)
+            if is_master(event):
+                return 1.0, n
+            wd = _weights.setdefault(key, {})
+            cur = wd.get(str(user_id))
+            w = float(cur[0]) if cur else 1.0
+            last = float(cur[1]) if cur else now
+            # 长时间没触发：每 recover_sec 秒自动回升一点
+            if recover_sec > 0 and now - last >= recover_sec:
+                w = min(1.0, w + recover * int((now - last) // recover_sec))
+            # 这次触发本身：超阈值就自减，回到阈值内就自增
+            if n > free_n:
+                w = max(floor, w - step)
+            else:
+                w = min(1.0, w + recover)
+            w = max(floor, min(1.0, w))
+            wd[str(user_id)] = [w, now]
+            return w, n
     except Exception:
-        pass
+        return 1.0, 0
 
 
 def _weight_for(event, user_id):
-    """返回 (权重, 窗口内触发次数)。主人恒为 1.0。"""
+    """只读当前权重（会先按"多久没触发"补上时间回升）。主人恒 1.0。"""
     try:
         if is_master(event):
             return 1.0, 0
-        free_n, window, step, floor, _ = _throttle_params()
+        free_n, window, _step, floor, _gap, recover, recover_sec = _throttle_params()
         key = get_session_key(event)
         now = time.time()
+        n = _window_count(key, user_id, window, now)
         with _recent_triggers_lock:
-            arr = list((_recent_triggers.get(key) or {}).get(str(user_id)) or [])
-        n = sum(1 for t in arr if now - t <= window)
-        if n <= free_n:
-            return 1.0, n
-        return max(floor, 1.0 - step * (n - free_n)), n
+            cur = (_weights.get(key) or {}).get(str(user_id))
+            w = float(cur[0]) if cur else 1.0
+            last = float(cur[1]) if cur else now
+            if recover_sec > 0 and now - last >= recover_sec:
+                w = min(1.0, w + recover * int((now - last) // recover_sec))
+                _weights.setdefault(key, {})[str(user_id)] = [w, now]
+        return max(floor, min(1.0, w)), n
     except Exception:
         return 1.0, 0
 
 
 def _reply_gap_required(weight):
     """已降频时两次回复至少要隔多久：gap_base ÷ 权重（权重越低越慢）"""
-    _, _, _, _, gap_base = _throttle_params()
+    _, _, _, _, gap_base, _, _ = _throttle_params()
     if gap_base <= 0 or weight >= 1.0:
         return 0.0
     return gap_base / max(0.05, weight)
@@ -2751,8 +2807,7 @@ def handle(event):
         return False
 
     # ===== 自适应降频（方案 A）：基础概率 × 滑动窗口权重，主人在此之上直接放行 =====
-    _note_trigger(event, user_id)
-    _weight, _seen = _weight_for(event, user_id)
+    _weight, _seen = _note_trigger(event, user_id)
     if _weight < 1.0:
         _gap = _reply_gap_required(_weight)
         _last = _last_reply_of(event)
