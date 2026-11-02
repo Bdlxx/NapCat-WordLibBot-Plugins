@@ -597,23 +597,32 @@ def _load_stickers(force=False):
 
 
 def _sticker_pick(tag, session_key):
-    """按标签随机抽一张；同会话冷却期内直接放弃（返回 None），最近用过的排后面"""
+    """按标签**轮转**取图：第 1 次第 1 张、第 2 次第 2 张……用满一轮再从头开始。
+
+    （原来是从池子里 random.choice，用户反馈"每次都是同一张"；改成轮转后同一标签的
+      12 张会被依次用一遍，观感是"自动切换"。轮转计数按「会话 + 标签」各记各的，
+      所以不同群/不同标签互不干扰；冷却期跳过的那些**不推进**计数，下次仍从这张开始。）
+    """
     files = (_load_stickers() or {}).get(tag) or []
     if not files:
         print(f"[AI对话] 表情标签不存在: {tag}")
         return None
     with _sticker_lock:
-        st = _sticker_state.setdefault(session_key, {"last": 0.0, "recent": []})
+        st = _sticker_state.setdefault(session_key, {"last": 0.0, "rot": {}})
         cool = float(CONFIG.get("sticker_cooldown_sec", 30) or 0)
         if cool > 0 and (time.time() - float(st.get("last") or 0)) < cool:
             print(f"[AI对话] 表情冷却中，跳过: {tag}")
             return None
-        recent = st.get("recent") or []
-        pool = [p for p in files if p not in recent] or list(files)
-        pick = random.choice(pool)
+        rot = st.get("rot")
+        if not isinstance(rot, dict):
+            rot = st["rot"] = {}
+        n = len(files)
+        idx = int(rot.get(tag, 0)) % n
+        pick = files[idx]
+        rot[tag] = (idx + 1) % n          # 下一张
         st["last"] = time.time()
-        keep = max(1, len(files) - 1)
-        st["recent"] = (recent + [pick])[-keep:]
+        st["rot"] = rot
+        print(f"[AI对话] 表情轮转: {tag} 第 {idx + 1}/{n} 张 → {pick}")
     return pick
 
 
