@@ -36,48 +36,41 @@ __config_schema__ = {
         "help": "全局总开关，关闭后群聊/私聊都不再回复（分群开关见「群组管理」）",
         "default": True,
     },
-    # ---------------- 模型与凭证（current_model / glm.* / gemini.*）----------------
+    # ---------------- 模型库（2026-11-03：任意条模型记录，替代原来写死的 glm/gemini 两槽位）----------------
+    "models": {
+        "type": "object_list", "label": "模型库", "group": "模型管理",
+        "test_action": "model_test",
+        "item_fields": {
+            "name": {"type": "text", "label": "显示名", "required": True,
+                     "placeholder": "GLM（群里用「切换模型 GLM」切到它）"},
+            "model": {"type": "text", "label": "调用名称", "placeholder": "gpt-4o / gemini-2.5-flash"},
+            "url": {"type": "text", "label": "调用地址",
+                    "placeholder": "https://xxx.com/v1 （自动补 /chat/completions）"},
+            "key": {"type": "password", "label": "API 密钥"},
+            "vision": {"type": "bool", "label": "识图"},
+            "enabled": {"type": "bool", "label": "启用"},
+            # 不占版面的隐藏字段：id 是主键（面板保存时原样带回），protocol 保留给将来多协议
+            "id": {"type": "text", "label": "id", "hidden": True},
+            "protocol": {"type": "text", "label": "protocol", "hidden": True, "default": "openai"},
+        },
+        "help": "每行一条模型：显示名唯一（群内用「切换模型 <显示名>」）；调用地址填到 /v1 即可，"
+                "自动补 /chat/completions，填完整地址也认；顺序＝失败时的尝试顺序；" 
+                "「识图」不勾的模型不会收到带图片的消息；行尾「测试」会发一条最小请求验证。",
+        "default": [],
+    },
     "current_model": {
-        "type": "select", "label": "当前 AI 模型", "group": "模型与凭证",
-        "path": "current_model",
-        "options": [{"value": "glm", "label": "GLM（glm.* 配置）"},
-                    {"value": "gemini", "label": "Gemini（gemini.* 配置）"}],
-        "help": "主人也可以用指令「切换glm / 切换gemini」切换；主模型连续失败时会自动临时切到另一个",
-        "default": "gemini",
+        "type": "select", "label": "当前 AI 模型", "group": "模型管理",
+        "path": "current_model", "options_from": "models",
+        "help": "从模型库里选；当前模型被删/禁用时自动回落到第一条启用的。"
+                "主人可在群里用「模型列表」「切换模型 <显示名>」查看与切换。",
+        "default": "",
     },
-    "glm_api_url": {
-        "type": "text", "label": "GLM 接口地址", "group": "模型与凭证", "advanced": True,
-        "path": "glm.api_url",
-        "help": "OpenAI 兼容的 chat/completions 地址，必须包含 /v1/chat/completions",
-        "default": "https://allgpt.xianyuw.cn/v1/chat/completions",
-    },
-    "glm_api_key": {
-        "type": "password", "label": "GLM API Key", "group": "模型与凭证",
-        "path": "glm.api_key",
-        "help": "中转/官方 Key；留空则该模型不可用（会自动走另一个模型）",
-        "default": "sk-BFIFOauFuO3GHyUxLP1glqks1siNhMrz8KQeT9Kh4ExtIuwq",
-    },
-    "glm_model": {
-        "type": "text", "label": "GLM 模型名", "group": "模型与凭证", "advanced": True,
-        "path": "glm.model", "help": "中转实际在售的型号（2026-10-28 起 glm-4v-flash 已下架，用 glm-5.3-flash；须支持识图）",
-        "default": "glm-5.3-flash",
-    },
-    "gemini_api_url": {
-        "type": "text", "label": "Gemini 接口地址", "group": "模型与凭证", "advanced": True,
-        "path": "gemini.api_url",
-        "help": "OpenAI 兼容的 chat/completions 地址",
-        "default": "https://allgpt.xianyuw.cn/v1/chat/completions",
-    },
-    "gemini_api_key": {
-        "type": "password", "label": "Gemini API Key", "group": "模型与凭证",
-        "path": "gemini.api_key",
-        "help": "中转/官方 Key；留空则该模型不可用（会自动走另一个模型）",
-        "default": "sk-Zgg2VxABbCHEiI0Lh0xGXHhyf8LKET445Y7qXRmoukDOC9lM",
-    },
-    "gemini_model": {
-        "type": "text", "label": "Gemini 模型名", "group": "模型与凭证", "advanced": True,
-        "path": "gemini.model", "help": "如 gemini-2.5-flash",
-        "default": "gemini-2.5-flash",
+    "model_fail_cooldown_sec": {
+        "type": "number", "label": "失败冷却", "group": "模型管理", "unit": "秒",
+        "path": "model_fail_cooldown_sec", "min": 0, "max": 3600,
+        "help": "某个模型调用失败后，这段时间内不再优先尝试它（0=不冷却）；"
+                "全部模型都在冷却时仍会按顺序重试。",
+        "default": 120,
     },
 
     # ---------------- 参数 ----------------
@@ -279,29 +272,29 @@ __config_schema__ = {
         "path": "commands.mode_off", "default": "关闭伪人模式",
         "help": "触发词：整条消息全等，仅主人可用（切回普通模式）",
     },
-    "cmd_switch_glm": {
+    "cmd_model_list": {
         "advanced": True,
-        "type": "text", "label": "切换 GLM", "group": "指令",
-        "path": "commands.switch_glm", "default": "切换glm",
+        "type": "text", "label": "模型列表", "group": "指令",
+        "path": "commands.model_list", "default": "模型列表",
+        "help": "触发词：整条消息全等，仅主人可用（回图片卡片）",
+    },
+    "cmd_model_list_alt": {
+        "advanced": True,
+        "type": "text", "label": "模型列表（备用词1）", "group": "指令",
+        "path": "commands.model_list_alt", "default": "模型",
         "help": "触发词：整条消息全等，仅主人可用",
     },
-    "cmd_switch_glm_alt": {
+    "cmd_model_list_alt2": {
         "advanced": True,
-        "type": "text", "label": "切换 GLM（备用词）", "group": "指令",
-        "path": "commands.switch_glm_alt", "default": "用glm",
+        "type": "text", "label": "模型列表（备用词2）", "group": "指令",
+        "path": "commands.model_list_alt2", "default": "查看模型",
         "help": "触发词：整条消息全等，仅主人可用",
     },
-    "cmd_switch_gemini": {
+    "cmd_switch_model": {
         "advanced": True,
-        "type": "text", "label": "切换 Gemini", "group": "指令",
-        "path": "commands.switch_gemini", "default": "切换gemini",
-        "help": "触发词：整条消息全等，仅主人可用",
-    },
-    "cmd_switch_gemini_alt": {
-        "advanced": True,
-        "type": "text", "label": "切换 Gemini（备用词）", "group": "指令",
-        "path": "commands.switch_gemini_alt", "default": "用gemini",
-        "help": "触发词：整条消息全等，仅主人可用",
+        "type": "text", "label": "切换模型", "group": "指令",
+        "path": "commands.switch_model", "default": "切换模型",
+        "help": "前缀触发：切换模型 <显示名>，仅主人可用",
     },
     "cmd_current_model": {
         "advanced": True,
@@ -365,16 +358,11 @@ __config_schema__ = {
         "path": "messages.mode_off", "help": "无占位符",
         "default": "已切回普通模式：只认 @ 和叫名字",
     },
-    "msg_switch_glm": {
+    "msg_switch_model": {
         "advanced": True,
-        "type": "text", "label": "切换 GLM 成功", "group": "回复模板",
-        "path": "messages.switch_glm", "help": "可用占位符：{model}=实际切换到的型号",
-        "default": "已切换到 {model}",
-    },
-    "msg_switch_gemini": {
-        "advanced": True,
-        "type": "text", "label": "切换 Gemini 成功", "group": "回复模板",
-        "path": "messages.switch_gemini", "help": "可用占位符：{model}=实际切换到的型号",
+        "type": "text", "label": "切换模型成功", "group": "回复模板",
+        "path": "messages.switch_model",
+        "help": "占位符：{model}=显示名，{id}=实际调用名称",
         "default": "已切换到 {model}",
     },
     "msg_current_model": {
@@ -415,12 +403,6 @@ __config_schema__ = {
         "default": "看看你发了什么图~",
     },
 
-    "gemini_fallback_models": {
-        "type": "text", "label": "低价备选型号链", "group": "模型与凭证",
-        "path": "gemini_fallback_models",
-        "help": "同一中转/同一把 key 下的备用型号，逗号分隔、按顺序尝试。2026-10-28 实测（allvip 组）：gemini-2.5-flash 0.226 / glm-5.3-flash 0.24 / gemini-3.7-flash 0.469 / gemini-3.8-flash 0.469 可用；gemini-3.5-flash-lite 虽标价 0.24 但该中转报 400/500 不可用；free 组模型本 key 无权",
-        "default": "gemini-2.5-flash, gemini-3.7-flash, glm-5.3-flash",
-    },
 
     # ---------------- 语音（本地 TTS） ----------------
     "tts_enabled": {
@@ -514,7 +496,7 @@ __config_schema__ = {
         "type": "json", "label": "指令标签映射", "group": "其它",
         "path": "command_labels", "advanced": True, "readonly": True, "rows": 8,
         "help": "插件启动时自动写入的「触发词 → 指令中文名」映射，供面板显示可读名称；只读",
-        "default": {"开启AI对话": "开启AI对话", "关闭AI对话": "关闭AI对话", "切换glm": "切换GLM模型", "用glm": "切换GLM模型", "切换gemini": "切换Gemini模型", "用gemini": "切换Gemini模型", "当前模型": "查看当前模型", "用什么模型": "查看当前模型", "清除历史": "清除会话历史", "清空历史": "清除会话历史", "清空记忆": "清除会话历史", "清除所有历史": "清除所有历史", "清空所有历史": "清除所有历史", "清空所有记忆": "清除所有历史"},
+        "default": {"开启AI对话": "开启AI对话", "关闭AI对话": "关闭AI对话", "模型列表": "查看模型列表", "模型": "查看模型列表", "查看模型": "查看模型列表", "切换模型": "切换模型", "当前模型": "查看当前模型", "用什么模型": "查看当前模型", "清除历史": "清除会话历史", "清空历史": "清除会话历史", "清空记忆": "清除会话历史", "清除所有历史": "清除所有历史", "清空所有历史": "清除所有历史", "清空所有记忆": "清除所有历史"},
     },
     "_note": {
         "type": "textarea", "label": "配置说明（只读）", "group": "其它",
@@ -1166,8 +1148,12 @@ def cmd(k, d=None):
 
 # ============ 配置区域 ============
 CONFIG = {
-    # 当前使用的模型: "glm" 或 "gemini"（全局配置，只有主人可改）
-    "current_model": "glm",
+    # 模型库（2026-11-03）：[{id,name,model,url,key,vision,enabled,protocol}]
+    # 旧字段 glm/gemini 只为"首次迁移"保留，迁移后不再读取
+    "models": [],
+    "model_fail_cooldown_sec": 120,
+    # 当前模型：存模型库里的 id（旧版本是 "glm"/"gemini"，会自动迁移）
+    "current_model": "",
     
     # GLM-4V-Flash 配置
     "glm": {
@@ -1252,6 +1238,201 @@ CONFIG = {
     "error_forward_to_master": True,
 }
 
+# ---------------------------------------------------------------- 模型库
+# 2026-11-03：把写死的 glm/gemini 两槽位换成**模型库**（persona_config.json 的 models 数组）。
+# 每条记录：{id, name, model, url, key, vision, enabled, protocol}
+#   id      自动生成 m1/m2…，current_model 存它（改名/重排不影响"当前是哪个"）
+#   name    显示名，**唯一**，群里「切换模型 <显示名>」用它
+#   url     可填完整 chat/completions 地址，也可只填到 /v1（自动补）
+#   vision  是否支持识图；带图的消息只发给 vision=true 的模型
+# 旧字段 glm.* / gemini.* / gemini_fallback_models 保留在文件里但**不再读取**（迁移一次）。
+
+_MODEL_COOLDOWN = {}            # 模型 id -> 冷却到什么时候（time.time()）
+DEFAULT_MODEL_COOLDOWN_SEC = 120
+
+
+def _norm_endpoint(url):
+    """地址智能补全：完整端点原样用；只给到 /v1 或域名则补 /chat/completions"""
+    u = (url or "").strip()
+    if not u:
+        return ""
+    if re.search(r"/chat/completions/?$", u):
+        return u
+    u = u.rstrip("/")
+    if re.search(r"/v\d+$", u):
+        return u + "/chat/completions"
+    return u + "/v1/chat/completions"
+
+
+def _models_raw():
+    raw = CONFIG.get("models")
+    return raw if isinstance(raw, list) else []
+
+
+def _norm_model(m):
+    """把一条库记录归一化成运行时用的配置；缺 model/url/key 的返回 None"""
+    if not isinstance(m, dict):
+        return None
+    model = str(m.get("model") or "").strip()
+    url = _norm_endpoint(m.get("url"))
+    key = str(m.get("key") or "").strip()
+    if not (model and url and key):
+        return None
+    return {
+        "id": str(m.get("id") or ""),
+        "name": str(m.get("name") or model),
+        "model": model,
+        "url": url,
+        "key": key,
+        "vision": bool(m.get("vision", True)),
+        "enabled": bool(m.get("enabled", True)),
+        "protocol": str(m.get("protocol") or "openai"),
+    }
+
+
+def _models(include_disabled=False):
+    """可用模型（按数组顺序）；默认只给启用的"""
+    out = []
+    for m in _models_raw():
+        n = _norm_model(m)
+        if not n:
+            continue
+        if not include_disabled and not n["enabled"]:
+            continue
+        out.append(n)
+    return out
+
+
+def _model_by_id(mid):
+    for m in _models():
+        if m["id"] == str(mid):
+            return m
+    return None
+
+
+def _current_model():
+    """当前模型（含失效回落：配置里的 id 不在库里 → 取第一条启用的并提醒一次）"""
+    models = _models()
+    if not models:
+        return None
+    cur = str(CONFIG.get("current_model") or "")
+    for m in models:
+        if m["id"] == cur:
+            return m
+    if cur and not _FALLBACK_WARNED[0]:
+        _FALLBACK_WARNED[0] = True
+        print(f"[AI对话] 当前模型 {cur!r} 不在模型库里（被删或禁用），自动改用 {models[0]['name']}")
+    return models[0]
+
+
+_FALLBACK_WARNED = [False]
+
+
+def _model_cooldown_sec():
+    try:
+        return float(CONFIG.get("model_fail_cooldown_sec", DEFAULT_MODEL_COOLDOWN_SEC) or 0)
+    except (TypeError, ValueError):
+        return DEFAULT_MODEL_COOLDOWN_SEC
+
+
+def _model_cooling(mid):
+    until = _MODEL_COOLDOWN.get(str(mid)) or 0
+    return until > time.time()
+
+
+def _mark_model_fail(mid):
+    cd = _model_cooldown_sec()
+    if cd > 0 and mid:
+        _MODEL_COOLDOWN[str(mid)] = time.time() + cd
+
+
+def _mark_model_ok(mid):
+    if mid:
+        _MODEL_COOLDOWN.pop(str(mid), None)
+
+
+def _ensure_models():
+    """迁移：没有 models 数组时，把旧的 glm/gemini 两槽位转成两条记录。
+
+    返回 True 表示做了迁移（调用方应 save_config 落盘）。只在“确实没有 models”时动手，
+    模型库被用户清空后不会反复写回旧数据。
+    """
+    if _models_raw():
+        return False
+    out, legacy_map = [], {}
+    for idx, (slot, label) in enumerate((("glm", "GLM"), ("gemini", "Gemini")), start=1):
+        cfg = CONFIG.get(slot) or {}
+        model = str(cfg.get("model") or "").strip()
+        if not model:
+            continue
+        mid = f"m{idx}"
+        legacy_map[slot] = mid
+        out.append({
+            "id": mid, "name": label, "model": model,
+            "url": str(cfg.get("api_url") or ""), "key": str(cfg.get("api_key") or ""),
+            "vision": True, "enabled": True, "protocol": "openai",
+        })
+    if not out:
+        return False
+    CONFIG["models"] = out
+    cur = str(CONFIG.get("current_model") or "")
+    if cur in legacy_map:
+        CONFIG["current_model"] = legacy_map[cur]
+    elif cur not in {m["id"] for m in out}:
+        CONFIG["current_model"] = out[0]["id"]
+    print(f"[AI对话] 已迁移模型库：{', '.join(m['name'] + '/' + m['model'] for m in out)}"
+          f"（当前 {CONFIG['current_model']}）")
+    return True
+
+
+def _dump_config():
+    """把 CONFIG 落盘。**不能依赖 save_config()**：迁移发生在模块导入期，
+    那时 save_config 还没定义（本轮踩过 NameError 导致迁移没写进文件）。"""
+    try:
+        path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..",
+                            "data", "persona_config.json")
+        no_save = ("free_n", "window_sec", "step", "recover", "recover_sec",
+                   "floor", "gap_base", "strip_peer_names")
+        out = {k: v for k, v in CONFIG.items() if k != "persona" and k not in no_save}
+        with open(path, "w", encoding="utf-8") as fp:
+            json.dump(out, fp, ensure_ascii=False, indent=2)
+        return True
+    except Exception as e:
+        print(f"[AI对话] 写配置失败: {e}")
+        return False
+
+
+def _unique_model_names(models):
+    """补 id + 显示名去重（面板保存/插件保存都走这里）。
+
+    - 缺 id 的记录补一个没用过的 m<N>（面板"新增一条"时前端不给 id）
+    - 显示名重复的自动加 -2/-3 后缀（群内「切换模型 <显示名>」要求唯一）
+    """
+    used_ids = {str(m.get("id")) for m in models if isinstance(m, dict) and m.get("id")}
+    for m in models:
+        if not isinstance(m, dict):
+            continue
+        if not m.get("id"):
+            i = 1
+            while f"m{i}" in used_ids:
+                i += 1
+            m["id"] = f"m{i}"
+            used_ids.add(m["id"])
+        if not m.get("protocol"):
+            m["protocol"] = "openai"
+    seen = set()
+    for m in models:
+        base = str(m.get("name") or m.get("model") or "模型").strip() or "模型"
+        name, i = base, 2
+        while name in seen:
+            name = f"{base}-{i}"
+            i += 1
+        seen.add(name)
+        m["name"] = name
+    return models
+
+
+
 def load_config():
     global CONFIG
     try:
@@ -1295,12 +1476,17 @@ def reload_config():
     global _own_bot_cache
     _own_bot_cache = None          # 名单可能刚在配置里改过，重新探测
     load_config()
+    if _ensure_models():             # 面板若手改了配置，缺 models 时补迁移
+        _dump_config()
     try:
         _load_stickers(force=True)   # 面板改完表情库/开关后立刻生效
     except Exception:
         pass
 
 load_config()
+if _ensure_models():                # 首次启动：把旧的 glm/gemini 两槽位迁成模型库
+    _dump_config()
+_unique_model_names(CONFIG.get("models") or [])   # 补齐 id / 显示名去重（手写 JSON 也能用）
 
 # ============ 模型容错状态（运行时不写入文件）============
 _active_model = None          # 当前实际使用的模型，None=使用 configured
@@ -1308,49 +1494,30 @@ _primary_fail_time = 0        # 主模型失败时间戳
 _HEALTH_CHECK_INTERVAL = 1800 # 30 分钟健康检查间隔
 _model_lock = threading.Lock()  # 保护 _active_model / _primary_fail_time
 
-def _get_backup_model():
-    primary = CONFIG.get("current_model", "glm")
-    return "gemini" if primary == "glm" else "glm"
-
 def _health_check():
-    """测试主模型是否可用，可用则切回（后台运行，不阻塞主线程）"""
-    global _active_model, _primary_fail_time
-    with _model_lock:
-        primary = CONFIG.get("current_model", "glm")
-        if _active_model is None or _active_model == primary:
-            _active_model = None
-            return
-        if time.time() - _primary_fail_time < _HEALTH_CHECK_INTERVAL:
-            return
-    model_config = CONFIG.get(primary, CONFIG["glm"])
-    api_key = model_config.get("api_key", "")
-    if not api_key:
-        return
-    try:
-        print(f"[AI对话] 健康检查: 测试模型 {primary}...")
-        resp = requests.post(
-            model_config["api_url"],
-            headers={"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"},
-            json={"model": model_config["model"], "messages": [{"role": "user", "content": "ping"}], "max_tokens": 5},
-            timeout=(10, 15)
-        )
-        if resp.status_code == 200:
-            with _model_lock:
-                print(f"[AI对话] 健康检查通过，切回模型 {primary}")
-                _active_model = None
-                _primary_fail_time = 0
-    except:
-        with _model_lock:
-            _primary_fail_time = time.time()
-            print(f"[AI对话] 健康检查失败，模型 {primary} 仍不可用")
+    """模型库版本的健康检查：只清理到期的冷却记录。
+
+    以前这里是"测主模型 → 可用则切回另一个槽位"；现在 _targets() 每次都会把
+    「当前模型」排在最前、只把**冷却中**的模型排到最后，冷却一过期就自然回到当前模型，
+    所以不需要额外探测请求（省 token 也不打扰中转）。
+    """
+    now = time.time()
+    for mid, until in list(_MODEL_COOLDOWN.items()):
+        if until <= now:
+            _MODEL_COOLDOWN.pop(mid, None)
+
 
 def _health_check_loop():
-    """后台健康检查循环"""
+    """后台循环：定期清掉过期冷却（很轻，纯内存操作）"""
     while True:
-        _health_check()
-        time.sleep(max(CONFIG.get("health_check_interval", _HEALTH_CHECK_INTERVAL), 60))
+        time.sleep(max(int(CONFIG.get("health_check_interval", _HEALTH_CHECK_INTERVAL) or 1800), 60))
+        try:
+            _health_check()
+        except Exception as e:
+            print(f"[AI对话] 冷却清理异常: {e}")
 
-# 启动后台健康检查线程
+
+# 启动后台清理线程
 _health_thread = threading.Thread(target=_health_check_loop, daemon=True)
 _health_thread.start()
 
@@ -2108,65 +2275,47 @@ def _trigger_block(trigger, current_name, mentions, prev_name=None):
                  f"就别当成在跟你说；拿不准就轻描淡写带一句，别顺着「他在要求你」去想。）")
     return head
 
-def _parse_model_chain():
-    """低价备选型号（同一条中转、同一个 key），按配置顺序尝试。
-
-    配置 gemini_fallback_models：逗号分隔的模型名，例如
-    "gemini-3.7-flash, glm-5.3-flash"。留空 = 只用原来的两槽位容错。
-    """
-    raw = CONFIG.get("gemini_fallback_models", "")
-    if isinstance(raw, (list, tuple)):
-        names = [str(x).strip() for x in raw]
-    else:
-        names = str(raw or "").replace("，", ",").split(",")
-    return [n.strip() for n in names if n and n.strip()]
-
-
-def _synthetic_target(model_name):
-    """把一个型号名套到 gemini 槽位的 url/key 上（只在内存里，不改配置）"""
-    cfg = dict(CONFIG.get("gemini") or {})
-    cfg["model"] = model_name
-    return cfg
-
-
 def _primary_model_name():
-    primary = CONFIG.get("current_model", "gemini")
-    return ((CONFIG.get(primary) or {}).get("model") or primary).strip()
+    """当前模型的显示名（日志/提示用）"""
+    m = _current_model()
+    return m["name"] if m else "未配置"
 
 
-def _targets():
-    """尝试顺序 [(标签=型号名, 模型配置)]：上次成功的 → 主模型 → 低价备选链 → 另一个槽位"""
-    primary = CONFIG.get("current_model", "gemini")
-    backup = "gemini" if primary == "glm" else "glm"
-    out, seen = [], set()
-
-    def add(label, cfg):
-        if not cfg:
-            return
-        name = (cfg.get("model") or label or "").strip()
-        key = (cfg.get("api_key") or "").strip()
-        if not name or not key or name in seen:
-            return
-        seen.add(name)
-        out.append((name, cfg))
+def _targets(need_vision=False):
+    """尝试顺序 [(标签, 模型配置)]：上次成功的 → 当前模型 → 其余按数组顺序，冷却中的排最后"""
+    models = _models()
+    if not models:
+        return []
+    by_id = {m["id"]: m for m in models}
+    order, seen = [], set()
 
     with _model_lock:
         active = _active_model
-    if active:
-        add(active, _synthetic_target(active) if active != _primary_model_name() else CONFIG.get(primary))
-    add(_primary_model_name(), CONFIG.get(primary, CONFIG["glm"]))
-    for name in _parse_model_chain():
-        add(name, _synthetic_target(name))
-    add(None, CONFIG.get(backup))
+    cur = _current_model()
+    for m in ([by_id[active]] if active in by_id else []) + ([cur] if cur else []):
+        if m and m["id"] not in seen:
+            seen.add(m["id"])
+            order.append(m)
+    for m in models:
+        if m["id"] not in seen:
+            seen.add(m["id"])
+            order.append(m)
+
+    fresh = [m for m in order if not _model_cooling(m["id"])]
+    cooling = [m for m in order if _model_cooling(m["id"])]
+    out = []
+    for m in fresh + cooling:
+        if need_vision and not m["vision"]:
+            continue
+        out.append((m["name"], m))
     return out
 
 
 def call_ai(prompt, context, images, user_id=None, event=None, trigger=None, mentions=None,
             prev_name=None, mode=None):
-    """调用 AI API，带自动容错：主模型 → 低价备选型号链 → 另一个槽位（都失败返回 None）"""
-    global _active_model, _primary_fail_time
-    primary = CONFIG.get("current_model", "gemini")
-    targets = _targets()
+    """调用 AI API，带自动容错：上次成功的 → 当前模型 → 其余按模型库顺序（都失败返回 None）"""
+    global _active_model
+    targets = _targets(need_vision=bool(images))
 
     # 收集上下文中的其他用户ID用于记忆
     additional_ids = set()
@@ -2178,9 +2327,9 @@ def call_ai(prompt, context, images, user_id=None, event=None, trigger=None, men
 
     last_error = None
     for attempt, model_config in targets:
-        api_key = (model_config.get("api_key") or "").strip()
+        api_key = (model_config.get("key") or "").strip()
         if not api_key:
-            last_error = f"{attempt} API Key 未配置"
+            last_error = f"{attempt} 未配置 API Key"
             continue
 
         try:
@@ -2233,7 +2382,7 @@ def call_ai(prompt, context, images, user_id=None, event=None, trigger=None, men
                 _start = _time.time()
                 try:
                     resp = requests.post(
-                        model_config["api_url"],
+                        model_config["url"],
                         headers={"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"},
                         json={"model": model_config["model"], "messages": messages, "temperature": CONFIG.get("temperature", 0.8), "max_tokens": CONFIG.get("max_tokens", 500)},
                         timeout=(CONFIG.get("api_timeout", 90)
@@ -2255,19 +2404,17 @@ def call_ai(prompt, context, images, user_id=None, event=None, trigger=None, men
                 break
 
             if resp.status_code == 200:
+                _mark_model_ok(model_config.get("id"))
                 with _model_lock:
-                    if attempt == _primary_model_name():
-                        if _active_model:
-                            print(f"[AI对话] 主模型 {attempt} 已恢复，切回")
-                            _active_model = None
-                            _primary_fail_time = 0
-                    elif _active_model != attempt:
-                        _active_model = attempt
-                        _primary_fail_time = _time.time()
-                        print(f"[AI对话] 主模型 {primary} 不可用，暂用 {attempt}")
+                    if _active_model != model_config.get("id"):
+                        _active_model = model_config.get("id")
+                        if _current_model() and _active_model != _current_model()["id"]:
+                            print(f"[AI对话] 当前模型不可用，暂用「{attempt}」（成功后继续用它，直到手动切换）")
                 return resp.json()["choices"][0]["message"]["content"], None
+            _mark_model_fail(model_config.get("id"))
             last_error = f"{attempt} API 错误: {resp.status_code}"
         except Exception as e:
+            _mark_model_fail(model_config.get("id"))
             last_error = f"{attempt} 调用失败: {e}"
             print(f"[AI对话] {attempt} 调用异常，试下一个: {e}")
 
@@ -2312,6 +2459,7 @@ def save_config():
     # 免得哪天调了代码默认值却被文件里的旧值压住（本轮就踩过 step 停在 0.15）
     _NO_SAVE = ("free_n", "window_sec", "step", "recover", "recover_sec",
                 "floor", "gap_base", "strip_peer_names")
+    _unique_model_names(CONFIG.get("models") or [])
     _out = {k: v for k, v in CONFIG.items() if k != "persona" and k not in _NO_SAVE}
     with open(config_path, "w", encoding="utf-8") as f:
         json.dump(_out, f, ensure_ascii=False, indent=2)
@@ -2342,33 +2490,78 @@ def _cmd_disable(event, raw, kw):
     return True
 
 
-def _cmd_switch_glm(event, raw, kw):
-    global _active_model, _primary_fail_time
-    CONFIG["current_model"] = "glm"
-    save_config()
-    with _model_lock:
-        _active_model = None
-        _primary_fail_time = 0
-    send_message(event, msg("switch_glm", "已切换到 {model}").format(model=_primary_model_name()))
+def _model_list_lines():
+    """模型列表的数据（图片与文字兜底共用）"""
+    models = _models(include_disabled=True)
+    cur = CONFIG.get("current_model")
+    rows = []
+    for m in models:
+        if cur is None and m["enabled"] and not any(r["cur"] for r in rows):
+            cur = m["id"]           # 当前值失效时的展示回落
+        tags = []
+        if m["id"] == cur:
+            tags.append("当前")
+        tags.append("识图" if m["vision"] else "纯文本")
+        if not m["enabled"]:
+            tags.append("已关闭")
+        rows.append({"name": m["name"], "model": m["model"], "tags": tags,
+                     "cur": m["id"] == cur, "on": m["enabled"]})
+    return rows
+
+
+def _cmd_model_list(event, raw, kw):
+    """模型列表：渲染成图片（渲染失败退纯文本）"""
+    rows = _model_list_lines()
+    if not rows:
+        send_message(event, "模型库里还没有模型，去面板「插件配置 → AI 对话 → 模型管理」添加。")
+        return True
+    cur = next((r["name"] for r in rows if r["cur"]), "未设置")
+    subtitle = f"{len(rows)} 个模型 · 当前 {cur}"
+    try:
+        import utils.model_card as _mc
+        path = _mc.render_model_list(rows, subtitle)
+        with open(path, "rb") as fp:
+            b64 = base64.b64encode(fp.read()).decode()
+        send_message(event, [{"type": "image", "data": {"file": "base64://" + b64}}])
+        return True
+    except Exception as e:
+        print(f"[AI对话] 模型列表渲染失败，回退文字: {e}")
+    lines = ["📋 模型列表"]
+    for r in rows:
+        lines.append(("▶ " if r["cur"] else "· ") + r["name"]
+                     + f"（{r['model']}）" + ("｜" + "/".join(r["tags"]) if r["tags"] else ""))
+    send_message(event, "\n".join(lines))
     return True
 
 
-def _cmd_switch_gemini(event, raw, kw):
-    global _active_model, _primary_fail_time
-    CONFIG["current_model"] = "gemini"
+def _cmd_switch_model(event, raw, kw):
+    """切换模型 <显示名>"""
+    global _active_model
+    arg = (raw or "")[len(kw):].strip()
+    models = _models()
+    if not models:
+        send_message(event, "模型库是空的，先去面板添加模型。")
+        return True
+    if not arg:
+        names = " / ".join(m["name"] for m in models)
+        send_message(event, f"用法：切换模型 <显示名>\n可用：{names}")
+        return True
+    target = next((m for m in models if m["name"] == arg), None)
+    if target is None:
+        target = next((m for m in models if m["name"].lower() == arg.lower()), None)
+    if target is None:
+        names = " / ".join(m["name"] for m in models)
+        send_message(event, f"没有叫「{arg}」的模型。可用：{names}")
+        return True
+    CONFIG["current_model"] = target["id"]
     save_config()
     with _model_lock:
         _active_model = None
-        _primary_fail_time = 0
-    send_message(event, msg("switch_gemini", "已切换到 {model}").format(model=_primary_model_name()))
+    msg_tpl = msg("switch_model", "已切换到 {model}")
+    send_message(event, msg_tpl.format(model=target["name"], id=target["model"]))
     return True
 
 
-
-# ============ 对话模式：**按群**生效（2026-11-01 用户要求） ============
-# 之前只有一个全局 chat_mode：在某个群开伪人模式 = 所有群一起变伪人。
-# 现在：群聊优先用 group_chat_modes[群号]，没设置才回落全局 chat_mode；私聊用全局。
-# 面板「群聊管理」里的 AI 模式开关、群内「开启/关闭伪人模式」指令，改的都是**本群**。
 def _gid_key(event):
     gid = event.get("group_id")
     return "" if gid is None else str(gid)
@@ -2430,34 +2623,15 @@ def _cmd_set_mode(event, raw, kw):
     send_message(event, f"已切换到{'普通' if mode == 'normal' else '伪人'}模式{tip}（{scope}）")
     return True
 
-
 def _cmd_current_model(event, raw, kw):
-    slot = CONFIG.get("current_model", "gemini")
-    name = _primary_model_name()
-    chain = [c for c in _parse_model_chain() if c != name]
-    tip = f"（备选：{'/'.join(chain)}）" if chain else ""
-    send_message(event, msg("current_model", "当前模型: {model}").format(model=f"{name}{tip}"))
-    return True
-
-
-def _cmd_use_model(event, raw, kw):
-    """切换模型 <型号>：直接换 gemini 槽位里的型号名（同一中转/同一把 key）"""
-    global _active_model, _primary_fail_time
-    name = (raw or "")[len(kw):].strip()
-    if not name:
-        chain = _parse_model_chain()
-        send_message(event, "用法：切换模型 <型号>，例如 切换模型 gemini-3.7-flash"
-                            + (f"。当前备选链：{', '.join(chain)}" if chain else ""))
+    m = _current_model()
+    if not m:
+        send_message(event, "模型库是空的，先去面板添加模型。")
         return True
-    cfg = dict(CONFIG.get("gemini") or {})
-    cfg["model"] = name
-    CONFIG["gemini"] = cfg
-    CONFIG["current_model"] = "gemini"
-    save_config()
-    with _model_lock:
-        _active_model = None
-        _primary_fail_time = 0
-    send_message(event, f"已切换到 {name}")
+    others = [x["name"] for x in _models() if x["id"] != m["id"]]
+    tip = f"（备选：{'/'.join(others)}）" if others else ""
+    send_message(event, msg("current_model", "当前模型: {model}").format(
+        model=f"{m['name']} · {m['model']}{tip}"))
     return True
 
 
@@ -2478,11 +2652,10 @@ registry.register("开启伪人（模式）", [cmd("mode_on", "开启伪人模�
 registry.register("关闭伪人（模式）", [cmd("mode_off", "关闭伪人模式")], "把对话模式切回普通模式（只认 @/唤醒词，仍保留续接窗口）", _cmd_mode_normal, master_only=True)
 registry.register("开启AI对话", [cmd("enable", "开启AI对话")], "开启 AI 对话（群内=本群，私聊=全局）", _cmd_enable, master_only=True, kind="suffix")
 registry.register("关闭AI对话", [cmd("disable", "关闭AI对话")], "关闭 AI 对话（群内=本群，私聊=全局）", _cmd_disable, master_only=True, kind="suffix")
-registry.register("切换GLM模型", [cmd("switch_glm", "切换glm"), cmd("switch_glm_alt", "用glm")], "把 AI 模型切换为 GLM", _cmd_switch_glm, master_only=True)
-registry.register("切换Gemini模型", [cmd("switch_gemini", "切换gemini"), cmd("switch_gemini_alt", "用gemini")], "把 AI 模型切换为 Gemini", _cmd_switch_gemini, master_only=True)
+registry.register("模型列表", [cmd("model_list", "模型列表"), cmd("model_list_alt", "模型"), cmd("model_list_alt2", "查看模型")], "查看模型库（图片卡片）", _cmd_model_list, master_only=True)
+registry.register("切换模型", [cmd("switch_model", "切换模型")], "切换模型库里的模型（切换模型 <显示名>）", _cmd_switch_model, master_only=True, kind="prefix")
 registry.register("查看当前模型", [cmd("current_model", "当前模型"), cmd("current_model_alt", "用什么模型")], "查看当前使用的 AI 模型", _cmd_current_model, master_only=True)
 registry.register("切换对话模式", [cmd("set_mode", "切换模式")], "在普通模式（只认 @/唤醒词）与伪人模式（+被回复+随机接话）之间切换", _cmd_set_mode, master_only=True, kind="prefix")
-registry.register("切换模型型号", [cmd("use_model", "切换模型")], "把 AI 换成指定型号（同一条中转上切换）", _cmd_use_model, master_only=True, kind="prefix")
 registry.register("清除会话历史", [cmd("clear_history", "清除历史"), cmd("clear_history_alt", "清空历史"), cmd("clear_history_alt2", "清空记忆")], "清除当前会话的对话历史", _cmd_clear_history, master_only=True)
 registry.register("清除所有历史", [cmd("clear_all", "清除所有历史"), cmd("clear_all_alt", "清空所有历史"), cmd("clear_all_alt2", "清空所有记忆")], "清除全部会话的对话历史", _cmd_clear_all, master_only=True)
 
